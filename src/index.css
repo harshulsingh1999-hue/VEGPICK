@@ -8,9 +8,24 @@
     -ms-overflow-style: none;
     scrollbar-width: none;
   }
+  .safe-bottom {
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom, 0px));
+  }
+  .safe-top {
+    padding-top: max(1rem, env(safe-area-inset-top, 0px));
+  }
 }
 
-body {
+html, body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  overscroll-behavior-y: contain;
+}
+
+/* Ensure iOS WebKit allows typing, focusing, and selecting inside inputs despite body select-none */
+input, textarea, select, [contenteditable="true"] {
+  -webkit-user-select: text !important;
+  user-select: text !important;
 }

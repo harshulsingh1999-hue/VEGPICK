@@ -1,134 +1,62 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { User, MapPin, LogOut, Edit2, Tag, ChevronRight, Truck, Shield } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { User, MapPin, LogOut, Edit2, Tag, ChevronRight, Package } from 'lucide-react';
+import { Link, useNavigate } from 'react-router-dom';
+import { useToast } from '../context/ToastContext';
+import { PhoneOtpAuthCard } from '../components/PhoneOtpAuthCard';
 
 export const Profile = () => {
-  const { user, login, register, checkUserExists, logout, updateProfile } = useAuth();
-  const [phone, setPhone] = useState('');
-  const [otp, setOtp] = useState('');
-  const [showOtp, setShowOtp] = useState(false);
-  const [showRegister, setShowRegister] = useState(false);
-  const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
+  const { user, firebaseUser, authReady, ensureCustomerProfile, orders, logout, updateProfile, addAddress } = useAuth();
+  const { showToast } = useToast();
+  const navigate = useNavigate();
 
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState('');
-  const [editEmail, setEditEmail] = useState('');
+  const [editPhone, setEditPhone] = useState('');
 
-  const handleSendOtp = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (phone.length === 10) setShowOtp(true);
-  };
+  const [showAddAddress, setShowAddAddress] = useState(false);
+  const [newLabel, setNewLabel] = useState('Home');
+  const [newStreet, setNewStreet] = useState('');
+  const [newCity, setNewCity] = useState('');
+  const [newZip, setNewZip] = useState('');
 
-  const handleVerifyOtp = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (otp.length === 4) {
-      if (checkUserExists(phone)) {
-        login(phone);
-      } else {
-        setShowRegister(true);
-        setShowOtp(false);
-      }
+  useEffect(() => {
+    if (authReady && firebaseUser && !user) {
+      ensureCustomerProfile().catch(() => {
+        // user profile auto-init handled gracefully
+      });
     }
+  }, [authReady, firebaseUser, user, ensureCustomerProfile]);
+
+  const handleLogout = async () => {
+    await logout();
+    showToast('Logged out successfully', 'info');
+    navigate('/home');
   };
 
-  const handleRegister = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (name && email) {
-      register(phone, name, email);
-    }
-  };
-
-  const handleLogout = () => {
-    logout();
-    window.location.href = '/';
-  };
-
-  if (!user) {
+  if (!authReady || (firebaseUser && !user)) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[80vh] px-4">
-        <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mb-6">
+      <div className="flex flex-col items-center justify-center min-h-[70vh] gap-3">
+        <div className="w-8 h-8 border-4 border-green-600 border-t-transparent rounded-full animate-spin" />
+        <p className="text-xs text-gray-500">Loading your account...</p>
+      </div>
+    );
+  }
+
+  if (!firebaseUser || !user) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[80vh] px-4 py-8">
+        <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mb-5">
           <User className="text-green-600" size={40} />
         </div>
-        <h1 className="text-2xl font-bold mb-2">Welcome</h1>
-        <p className="text-gray-500 mb-8 text-center">Login to manage your orders and address</p>
-        
-        {!showOtp && !showRegister ? (
-          <form onSubmit={handleSendOtp} className="w-full max-w-sm space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Mobile Number</label>
-              <input
-                type="tel"
-                value={phone}
-                onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
-                placeholder="Enter 10 digit number"
-                className="w-full p-3 border border-gray-200 rounded-lg focus:ring-2 focus:ring-green-500 outline-none"
-                required
-              />
-            </div>
-            <button 
-              type="submit"
-              disabled={phone.length !== 10}
-              className="w-full bg-green-600 text-white py-3 rounded-lg font-medium disabled:bg-gray-300"
-            >
-              Send OTP
-            </button>
-          </form>
-        ) : showRegister ? (
-          <form onSubmit={handleRegister} className="w-full max-w-sm space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="John Doe"
-                className="w-full p-3 border border-gray-200 rounded-lg focus:ring-2 focus:ring-green-500 outline-none"
-                required
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Email Address</label>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="john@example.com"
-                className="w-full p-3 border border-gray-200 rounded-lg focus:ring-2 focus:ring-green-500 outline-none"
-                required
-              />
-            </div>
-            <button 
-              type="submit"
-              className="w-full bg-green-600 text-white py-3 rounded-lg font-medium"
-            >
-              Complete Registration
-            </button>
-          </form>
-        ) : (
-          <form onSubmit={handleVerifyOtp} className="w-full max-w-sm space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Enter OTP</label>
-              <input
-                type="text"
-                value={otp}
-                onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 4))}
-                placeholder="1234"
-                className="w-full p-3 border border-gray-200 rounded-lg focus:ring-2 focus:ring-green-500 outline-none tracking-widest text-center text-xl"
-                required
-              />
-              <p className="text-xs text-gray-500 mt-2">Use any 4 digits</p>
-            </div>
-            <button 
-              type="submit"
-              disabled={otp.length !== 4}
-              className="w-full bg-green-600 text-white py-3 rounded-lg font-medium disabled:bg-gray-300"
-            >
-              Verify & Login
-            </button>
-          </form>
-        )}
+        <h1 className="text-2xl font-bold mb-2">Customer Account</h1>
+        <p className="text-gray-500 mb-6 text-center max-w-sm text-sm">
+          Sign in securely with your mobile number via Firebase SMS OTP to sync your cart, saved addresses, and live order tracking.
+        </p>
+
+        <div className="w-full max-w-sm">
+          <PhoneOtpAuthCard createCustomerProfile />
+        </div>
       </div>
     );
   }
@@ -139,49 +67,71 @@ export const Profile = () => {
 
       <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 mb-6">
         <div className="flex items-center gap-4 mb-6">
-          <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center text-green-700 font-bold text-xl">
-            {user.name.charAt(0)}
+          <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center text-green-700 font-bold text-xl shrink-0">
+            {user.name.charAt(0).toUpperCase()}
           </div>
-          <div className="flex-1">
+          <div className="flex-1 min-w-0">
             {isEditing ? (
               <div className="flex flex-col gap-2">
-                <input 
-                  value={editName} 
+                <input
+                  value={editName}
                   onChange={(e) => setEditName(e.target.value)}
-                  placeholder="Name"
-                  className="border rounded px-2 py-1 w-full"
+                  placeholder="Full Name"
+                  className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm w-full outline-none focus:ring-2 focus:ring-green-500"
                 />
-                <input 
-                  value={editEmail} 
-                  onChange={(e) => setEditEmail(e.target.value)}
-                  placeholder="Email"
-                  className="border rounded px-2 py-1 w-full"
+                <input
+                  type="tel"
+                  value={editPhone}
+                  onChange={(e) => setEditPhone(e.target.value.replace(/\D/g, '').slice(0, 15))}
+                  placeholder="10-digit Mobile Number"
+                  className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm w-full outline-none focus:ring-2 focus:ring-green-500"
                 />
-                <button 
-                  onClick={() => { 
-                    updateProfile({ 
-                      name: editName || user.name,
-                      email: editEmail || user.email 
-                    }); 
-                    setIsEditing(false); 
-                  }}
-                  className="bg-green-600 text-white text-sm font-medium py-1 rounded"
-                >
-                  Save Changes
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={async () => {
+                      if (editPhone && editPhone.length < 10) {
+                        showToast('Please enter a valid 10-digit mobile number', 'error');
+                        return;
+                      }
+                      await updateProfile({
+                        name: editName.trim() || user.name,
+                        phone: editPhone
+                      });
+                      setIsEditing(false);
+                      showToast('Profile updated!', 'success');
+                    }}
+                    className="flex-1 bg-green-600 text-white text-xs font-bold py-2 rounded-lg"
+                  >
+                    Save Changes
+                  </button>
+                  <button
+                    onClick={() => setIsEditing(false)}
+                    className="px-3 py-2 border border-gray-200 rounded-lg text-xs text-gray-600"
+                  >
+                    Cancel
+                  </button>
+                </div>
               </div>
             ) : (
-              <div className="flex justify-between items-start">
-                <div>
-                  <h2 className="font-bold text-lg">{user.name}</h2>
-                  <p className="text-gray-500 text-sm">{user.phone}</p>
-                  <p className="text-gray-500 text-sm">{user.email || 'No email added'}</p>
+              <div className="flex justify-between items-start gap-2">
+                <div className="min-w-0">
+                  <h2 className="font-bold text-lg truncate">{user.name}</h2>
+                  {user.email && (
+                    <p className="text-gray-500 text-sm truncate">{user.email}</p>
+                  )}
+                  <p className={`text-xs mt-0.5 ${user.phone ? 'text-gray-700 font-semibold' : 'text-amber-600 font-semibold'}`}>
+                    {user.phone ? `Verified Mobile: +${user.phone}` : 'Add mobile number for deliveries'}
+                  </p>
                 </div>
-                <button onClick={() => { 
-                  setEditName(user.name); 
-                  setEditEmail(user.email);
-                  setIsEditing(true); 
-                }} className="p-2 text-gray-400 hover:text-green-600">
+                <button
+                  onClick={() => {
+                    setEditName(user.name);
+                    setEditPhone(user.phone || '');
+                    setIsEditing(true);
+                  }}
+                  className="p-2 text-gray-400 hover:text-green-600"
+                  aria-label="Edit profile"
+                >
                   <Edit2 size={18} />
                 </button>
               </div>
@@ -193,29 +143,133 @@ export const Profile = () => {
           <h3 className="font-semibold text-gray-800 flex items-center gap-2">
             <MapPin size={18} /> Saved Addresses
           </h3>
-          {user.addresses.map(addr => (
-            <div key={addr.id} className="p-3 bg-gray-50 rounded-lg border border-gray-100">
-              <div className="flex justify-between">
-                <span className="font-medium text-sm bg-white px-2 py-0.5 rounded border border-gray-200">{addr.label}</span>
+          {user.addresses?.map((addr) => (
+            <div key={addr.id} className="p-3 bg-gray-50 rounded-lg border border-gray-100 flex justify-between items-start">
+              <div>
+                <span className="font-medium text-xs bg-white px-2 py-0.5 rounded border border-gray-200">{addr.label}</span>
+                <p className="text-sm text-gray-700 mt-1">{addr.street}, {addr.city} - {addr.zip}</p>
               </div>
-              <p className="text-sm text-gray-600 mt-2">{addr.street}, {addr.city} - {addr.zip}</p>
+              <button
+                onClick={async () => {
+                  const filtered = user.addresses.filter((a) => a.id !== addr.id);
+                  await updateProfile({ addresses: filtered });
+                  showToast('Address removed', 'info');
+                }}
+                className="text-xs text-red-500 hover:text-red-700 font-medium ml-2"
+              >
+                Delete
+              </button>
             </div>
           ))}
-          <button className="w-full py-2 border border-dashed border-gray-300 rounded-lg text-gray-500 hover:border-green-500 hover:text-green-600 text-sm font-medium">
-            + Add New Address
-          </button>
+
+          {showAddAddress ? (
+            <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg space-y-3">
+              <p className="font-bold text-sm text-gray-800">Add New Address</p>
+              <div className="flex gap-2">
+                {['Home', 'Work', 'Other'].map((lbl) => (
+                  <button
+                    key={lbl}
+                    type="button"
+                    onClick={() => setNewLabel(lbl)}
+                    className={`px-3 py-1 rounded-full text-xs font-medium border ${
+                      newLabel === lbl ? 'bg-green-600 text-white border-green-600' : 'bg-white text-gray-700 border-gray-200'
+                    }`}
+                  >
+                    {lbl}
+                  </button>
+                ))}
+              </div>
+              <input
+                type="text"
+                placeholder="Street / House No."
+                value={newStreet}
+                onChange={(e) => setNewStreet(e.target.value)}
+                className="w-full p-2.5 text-sm bg-white border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-green-500"
+              />
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  type="text"
+                  placeholder="City"
+                  value={newCity}
+                  onChange={(e) => setNewCity(e.target.value)}
+                  className="w-full p-2.5 text-sm bg-white border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-green-500"
+                />
+                <input
+                  type="text"
+                  placeholder="Pincode"
+                  value={newZip}
+                  onChange={(e) => setNewZip(e.target.value)}
+                  className="w-full p-2.5 text-sm bg-white border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-green-500"
+                />
+              </div>
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!newStreet.trim() || !newCity.trim() || newZip.trim().length < 3) {
+                      showToast('Please enter street, city, and valid pincode', 'error');
+                      return;
+                    }
+                    await addAddress({
+                      label: newLabel,
+                      street: newStreet.trim(),
+                      city: newCity.trim(),
+                      zip: newZip.trim()
+                    });
+                    setShowAddAddress(false);
+                    setNewStreet('');
+                    setNewCity('');
+                    setNewZip('');
+                    showToast('Address saved!', 'success');
+                  }}
+                  className="flex-1 bg-green-600 text-white py-2 rounded-lg text-sm font-medium hover:bg-green-700"
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowAddAddress(false)}
+                  className="px-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-600 hover:bg-gray-100"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowAddAddress(true)}
+              className="w-full py-2 border border-dashed border-gray-300 rounded-lg text-gray-500 hover:border-green-500 hover:text-green-600 text-sm font-medium transition"
+            >
+              + Add New Address
+            </button>
+          )}
         </div>
       </div>
 
-      <Link to="/coupons" className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 mb-6 flex justify-between items-center">
+      <Link to="/orders" className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 mb-3 flex justify-between items-center hover:bg-gray-50 transition">
         <div className="flex items-center gap-3 text-gray-800 font-medium">
-          <Tag size={20} className="text-orange-500" />
+          <div className="w-9 h-9 rounded-full bg-green-50 text-green-600 flex items-center justify-center">
+            <Package size={20} />
+          </div>
+          <div>
+            <p className="text-sm font-bold">My Orders &amp; Tracking</p>
+            <p className="text-xs text-gray-400">{orders.length} {orders.length === 1 ? 'order' : 'orders'} placed</p>
+          </div>
+        </div>
+        <ChevronRight size={20} className="text-gray-400" />
+      </Link>
+
+      <Link to="/coupons" className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 mb-6 flex justify-between items-center hover:bg-gray-50 transition">
+        <div className="flex items-center gap-3 text-gray-800 font-medium">
+          <div className="w-9 h-9 rounded-full bg-orange-50 text-orange-500 flex items-center justify-center">
+            <Tag size={20} />
+          </div>
           <span>Available Coupons</span>
         </div>
         <ChevronRight size={20} className="text-gray-400" />
       </Link>
 
-      <button 
+      <button
         onClick={handleLogout}
         className="w-full bg-red-50 text-red-600 py-3 rounded-xl font-medium flex items-center justify-center gap-2 hover:bg-red-100"
       >

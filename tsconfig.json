@@ -21,6 +21,16 @@
       ]
     },
     "allowImportingTsExtensions": true,
-    "noEmit": true
-  }
+    "noEmit": true,
+    "types": [
+      "vite/client",
+      "vite-plugin-pwa/client"
+    ]
+  },
+  "exclude": [
+    "firestore.rules.test.ts",
+    "dist",
+    "dev-dist",
+    "node_modules"
+  ]
 }

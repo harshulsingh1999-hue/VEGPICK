@@ -78,8 +78,14 @@ export const ProductCard = ({ product }: { product: Product }) => {
             disabled={!product.available}
             className="w-full bg-green-600 text-white py-2 rounded-lg font-medium hover:bg-green-700 active:scale-95 transition-all disabled:bg-gray-300 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
-            <Plus size={16} />
-            Add to Cart
+            {product.available ? (
+              <>
+                <Plus size={16} />
+                Add to Cart
+              </>
+            ) : (
+              'Out of Stock'
+            )}
           </button>
         </div>
       </div>

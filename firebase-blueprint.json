@@ -1,0 +1,771 @@
+{
+  "entities": {
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Authorized store administrator entry keyed by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "role", "createdAt"]
+    },
+    "StoreSettings": {
+      "title": "StoreSettings",
+      "description": "Global storefront pricing, tax, and availability settings.",
+      "type": "object",
+      "properties": {
+        "taxRate": {
+          "type": "number"
+        },
+        "baseDeliveryFee": {
+          "type": "number"
+        },
+        "freeDeliveryThreshold": {
+          "type": "number"
+        },
+        "storeOpen": {
+          "type": "boolean"
+        },
+        "notificationsEnabled": {
+          "type": "boolean"
+        },
+        "catalogInitialized": {
+          "type": "boolean"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "taxRate",
+        "baseDeliveryFee",
+        "freeDeliveryThreshold",
+        "storeOpen",
+        "notificationsEnabled",
+        "updatedAt"
+      ]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Fresh vegetable or fruit catalog item managed by store admins.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "category": {
+          "type": "string",
+          "enum": ["Leafy Greens", "Root Vegetables", "Fruits", "Herbs", "Exotic"]
+        },
+        "pricePerKg": {
+          "type": "number"
+        },
+        "image": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "rating": {
+          "type": "number"
+        },
+        "reviews": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "category",
+        "pricePerKg",
+        "image",
+        "available",
+        "description",
+        "rating",
+        "reviews",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Coupon": {
+      "title": "Coupon",
+      "description": "Promotional discount coupon configured by store administration.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z0-9_-]+$",
+          "minLength": 2,
+          "maxLength": 32
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "discountType": {
+          "type": "string",
+          "enum": ["percent", "flat"]
+        },
+        "discountValue": {
+          "type": "number"
+        },
+        "minOrder": {
+          "type": "number"
+        },
+        "isActive": {
+          "type": "boolean"
+        },
+        "expiry": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "code",
+        "description",
+        "discountType",
+        "discountValue",
+        "minOrder",
+        "isActive",
+        "expiry",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated customer profile containing isolated PII and saved delivery addresses.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "uid": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "phone": {
+          "type": "string",
+          "pattern": "^$|^[0-9]{10,15}$",
+          "maxLength": 15
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "addresses": {
+          "type": "array"
+        },
+        "isBlocked": {
+          "type": "boolean"
+        },
+        "joinedDate": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "uid",
+        "name",
+        "phone",
+        "email",
+        "addresses",
+        "isBlocked",
+        "joinedDate",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserCart": {
+      "title": "UserCart",
+      "description": "Cross-device persistent shopping cart synced for Android and iOS clients.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "items": {
+          "type": "array"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "items", "updatedAt"]
+    },
+    "DeliveryPartner": {
+      "title": "DeliveryPartner",
+      "description": "Registered delivery partner profile and approval status.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "uid": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "partnerCode": {
+          "type": "string",
+          "pattern": "^[A-Z0-9_-]+$",
+          "maxLength": 32
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "phone": {
+          "type": "string",
+          "pattern": "^[0-9]{10,15}$",
+          "maxLength": 15
+        },
+        "area": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "vehicle": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "dlNumber": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "bankLast4": {
+          "type": "string",
+          "maxLength": 10
+        },
+        "ifsc": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "isOnline": {
+          "type": "boolean"
+        },
+        "isApproved": {
+          "type": "boolean"
+        },
+        "completedDeliveries": {
+          "type": "number"
+        },
+        "rating": {
+          "type": "number"
+        },
+        "settledCash": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "uid",
+        "partnerCode",
+        "name",
+        "email",
+        "phone",
+        "area",
+        "vehicle",
+        "isOnline",
+        "isApproved",
+        "completedDeliveries",
+        "rating",
+        "settledCash",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Customer produce order with delivery tracking and payment status.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "customerName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "customerPhone": {
+          "type": "string",
+          "pattern": "^[0-9]{10,15}$",
+          "maxLength": 15
+        },
+        "items": {
+          "type": "array"
+        },
+        "total": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["placed", "packed", "out_for_delivery", "delivered", "cancelled"]
+        },
+        "date": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "deliverySlot": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "address": {
+          "type": "object"
+        },
+        "paymentMethod": {
+          "type": "string",
+          "enum": ["cod", "upi"]
+        },
+        "paymentStatus": {
+          "type": "string",
+          "enum": ["pending", "collected", "paid"]
+        },
+        "deliveryPin": {
+          "type": "string",
+          "pattern": "^[0-9]{4}$",
+          "maxLength": 4
+        },
+        "assignedToUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "assignedToName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "assignedToCode": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "failureReason": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "proofImageUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "customerName",
+        "customerPhone",
+        "items",
+        "total",
+        "status",
+        "date",
+        "deliverySlot",
+        "address",
+        "paymentMethod",
+        "paymentStatus",
+        "deliveryPin",
+        "assignedToUid",
+        "assignedToName",
+        "assignedToCode",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "DispatchFeed": {
+      "title": "DispatchFeed",
+      "description": "PII-free dispatch queue metadata allowing approved drivers to discover unassigned orders.",
+      "type": "object",
+      "properties": {
+        "orderId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "city": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "zip": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "deliverySlot": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "itemCount": {
+          "type": "number"
+        },
+        "total": {
+          "type": "number"
+        },
+        "paymentMethod": {
+          "type": "string",
+          "enum": ["cod", "upi"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["placed", "packed", "out_for_delivery", "delivered", "cancelled"]
+        },
+        "assignedToUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "orderId",
+        "city",
+        "zip",
+        "deliverySlot",
+        "itemCount",
+        "total",
+        "paymentMethod",
+        "status",
+        "assignedToUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Complaint": {
+      "title": "Complaint",
+      "description": "Customer support ticket linked to an order or general inquiry.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "userId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "orderId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "customerName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "customerPhone": {
+          "type": "string",
+          "pattern": "^[0-9]{10,15}$",
+          "maxLength": 15
+        },
+        "category": {
+          "type": "string",
+          "enum": ["Quality", "Delay", "Missing Item", "Refund", "Other"]
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "status": {
+          "type": "string",
+          "enum": ["open", "in_progress", "resolved"]
+        },
+        "date": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "resolutionNotes": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "orderId",
+        "customerName",
+        "customerPhone",
+        "category",
+        "subject",
+        "description",
+        "status",
+        "date",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ActiveDelivery": {
+      "title": "ActiveDelivery",
+      "description": "Ephemeral live GPS telemetry document deleted automatically once the order reaches delivered or cancelled status.",
+      "type": "object",
+      "properties": {
+        "orderId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "customerUid": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "partnerUid": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "partnerName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "status": {
+          "type": "string",
+          "enum": ["assigned", "picked_up", "out_for_delivery"]
+        },
+        "lat": {
+          "type": "number"
+        },
+        "lng": {
+          "type": "number"
+        },
+        "accuracy": {
+          "type": "number"
+        },
+        "speed": {
+          "type": "number"
+        },
+        "heading": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "orderId",
+        "customerUid",
+        "partnerUid",
+        "partnerName",
+        "status",
+        "lat",
+        "lng",
+        "accuracy",
+        "speed",
+        "heading",
+        "updatedAt"
+      ]
+    },
+    "WalletLedgerEntry": {
+      "title": "WalletLedgerEntry",
+      "description": "Immutable financial ledger recording completed delivery credits and COD hub settlements.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "partnerUid": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "partnerName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "orderId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "type": {
+          "type": "string",
+          "enum": ["trip_credit", "cod_settlement"]
+        },
+        "amount": {
+          "type": "number"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "partnerUid",
+        "partnerName",
+        "orderId",
+        "type",
+        "amount",
+        "note",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/admins/{uid}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Allowlisted store administrators."
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/StoreSettings" },
+      "description": "Global storefront settings such as store/settings."
+    },
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Public produce inventory catalog managed by admins."
+    },
+    "/coupons/{code}": {
+      "schema": { "$ref": "#/entities/Coupon" },
+      "description": "Promotional discount coupons."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private customer profiles and addresses isolated by owner UID or admin."
+    },
+    "/carts/{userId}": {
+      "schema": { "$ref": "#/entities/UserCart" },
+      "description": "Persistent per-user shopping cart."
+    },
+    "/deliveryPartners/{partnerId}": {
+      "schema": { "$ref": "#/entities/DeliveryPartner" },
+      "description": "Delivery partner profiles, KYC summary, and admin approval status."
+    },
+    "/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Customer orders accessed by customer owner, assigned delivery partner, or admin."
+    },
+    "/dispatchFeed/{orderId}": {
+      "schema": { "$ref": "#/entities/DispatchFeed" },
+      "description": "PII-free dispatch queue for unassigned orders."
+    },
+    "/active_deliveries/{orderId}": {
+      "schema": { "$ref": "#/entities/ActiveDelivery" },
+      "description": "Ephemeral real-time GPS coordinate stream for active deliveries; deleted on completion."
+    },
+    "/walletLedger/{entryId}": {
+      "schema": { "$ref": "#/entities/WalletLedgerEntry" },
+      "description": "Permanent immutable payout and COD settlement ledger for delivery partners."
+    },
+    "/complaints/{complaintId}": {
+      "schema": { "$ref": "#/entities/Complaint" },
+      "description": "Customer support tickets and admin resolutions."
+    }
+  }
+}

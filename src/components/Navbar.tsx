@@ -7,8 +7,8 @@ export const Navbar = () => {
   const { cart } = useStore();
   const location = useLocation();
   
-  // Hide navbar on welcome and delivery pages
-  if (location.pathname === '/' || location.pathname.startsWith('/delivery')) {
+  // Hide navbar on welcome, delivery, and admin pages
+  if (location.pathname === '/' || location.pathname.startsWith('/delivery') || location.pathname.startsWith('/admin')) {
     return null;
   }
 
@@ -17,11 +17,11 @@ export const Navbar = () => {
   const isActive = (path: string) => location.pathname === path;
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 py-2 px-4 z-50 md:top-0 md:bottom-auto md:border-t-0 md:border-b">
+    <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 pt-1 pb-1 safe-bottom px-2 z-50 md:sticky md:top-0 md:bottom-auto md:border-t-0 md:border-b md:pt-2 md:pb-2">
       <div className="max-w-7xl mx-auto flex justify-around md:justify-between items-center">
-        <div className="hidden md:flex items-center gap-2">
+        <Link to="/home" className="hidden md:flex items-center gap-2">
           <span className="text-2xl font-bold text-green-600">FreshVeggie</span>
-        </div>
+        </Link>
 
         <div className="flex w-full md:w-auto justify-around md:gap-8">
           <Link to="/home" className={`flex flex-col items-center p-2 ${isActive('/home') ? 'text-green-600' : 'text-gray-500'}`}>

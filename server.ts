@@ -1,0 +1,491 @@
+import express from 'express';
+import crypto from 'crypto';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
+import { createCloudStack, type FirebaseAppletMeta } from './server/cloudStack.ts';
+
+dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const PORT = Number(process.env.PORT || 3000);
+const isProduction = process.env.NODE_ENV === 'production';
+
+interface QuoteItemInput {
+  pricePerKg: number;
+  selectedWeight: number;
+  quantity: number;
+}
+
+interface QuoteRequestBody {
+  items?: QuoteItemInput[];
+  taxRate?: number;
+  baseDeliveryFee?: number;
+  freeDeliveryThreshold?: number;
+  discountType?: 'percent' | 'flat';
+  discountValue?: number;
+  minOrder?: number;
+}
+
+interface VerifyStockItemInput {
+  id?: string;
+  name?: string;
+  available?: boolean;
+  selectedWeight?: number;
+  quantity?: number;
+  pricePerKg?: number;
+}
+
+async function startServer() {
+  const app = express();
+  app.set('trust proxy', true);
+  app.use(express.json({ limit: '1mb' }));
+
+  // Cross-origin headers for multi-server failover & Cloudflare Workers edge proxies
+  app.use((req, res, next) => {
+    if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      if (req.method === 'OPTIONS') {
+        res.status(204).end();
+        return;
+      }
+    }
+    next();
+  });
+
+  // Load provisioned Firebase project metadata (public client config only, no secrets)
+  let firebaseMeta: FirebaseAppletMeta = {};
+  const firebaseConfigPath = path.join(__dirname, 'firebase-applet-config.json');
+  if (fs.existsSync(firebaseConfigPath)) {
+    try {
+      firebaseMeta = JSON.parse(fs.readFileSync(firebaseConfigPath, 'utf-8')) as FirebaseAppletMeta;
+    } catch {
+      firebaseMeta = {};
+    }
+  }
+
+  const cloud = createCloudStack(__dirname, firebaseMeta);
+  app.use('/uploads', express.static(cloud.uploadsDir, { maxAge: '365d', immutable: true }));
+
+  const applyRateLimit =
+    (bucket: string, maxRequests: number, windowSeconds: number): express.RequestHandler =>
+    async (req, res, next) => {
+      const clientIp = (req.ip || req.socket.remoteAddress || 'unknown').slice(0, 64);
+      const result = await cloud.checkRateLimit(bucket, clientIp, maxRequests, windowSeconds);
+      res.setHeader('X-RateLimit-Remaining', String(result.remaining));
+      if (!result.allowed) {
+        res.setHeader('Retry-After', String(result.resetSeconds));
+        res.status(429).json({
+          error: 'Too many requests from this device. Please retry shortly.'
+        });
+        return;
+      }
+      next();
+    };
+
+  // Health & Multi-Cloud Diagnostics API
+  app.get('/api/health', (_req, res) => {
+    const diag = cloud.getDiagnostics();
+    res.json({
+      status: 'healthy',
+      service: 'FreshVeggie Delivery API',
+      runtime: `Node.js ${process.version}`,
+      backend: 'Express 4 + TypeScript',
+      database: diag.databases.realtimePrimary,
+      multiDatabase: diag.databases,
+      auth: 'Firebase Authentication (Mobile Phone OTP + Google OAuth 2.0)',
+      mediaStorage: diag.objectStorage,
+      cache: {
+        engine: `L1 Memory + ${diag.caches.l2Provider}`,
+        entries: diag.caches.l1Entries,
+        l1Hits: diag.caches.l1Hits,
+        l2Hits: diag.caches.l2Hits,
+        misses: diag.caches.misses
+      },
+      serverNode: {
+        replicaId: diag.replicaId,
+        region: diag.region
+      },
+      cloudProjectId: firebaseMeta.projectId || null,
+      firestoreDatabaseId: firebaseMeta.firestoreDatabaseId || null,
+      platforms: ['Web', 'Android PWA/TWA', 'iOS Safari PWA'],
+      timestamp: new Date().toISOString()
+    });
+  });
+
+  // Edge-Cached Storefront Bootstrap API (eliminates millions of direct Firestore reads at 1M DAU)
+  app.get('/api/catalog/bootstrap', async (req, res) => {
+    const payload = await cloud.getCatalogBootstrap();
+    const etag = `"${crypto
+      .createHash('sha1')
+      .update(JSON.stringify({ p: payload.products, c: payload.coupons, s: payload.settings }))
+      .digest('hex')}"`;
+
+    res.setHeader(
+      'Cache-Control',
+      'public, max-age=30, s-maxage=120, stale-while-revalidate=600'
+    );
+    res.setHeader('ETag', etag);
+    res.setHeader('X-Catalog-Source', payload.source);
+
+    if (req.headers['if-none-match'] === etag) {
+      res.status(304).end();
+      return;
+    }
+
+    res.json(payload);
+  });
+
+  app.post('/api/catalog/invalidate', applyRateLimit('invalidate', 30, 60), async (_req, res) => {
+    await cloud.invalidateCatalogCache();
+    res.json({ ok: true });
+  });
+
+  // Compressed Media Upload Endpoint (< 300 KB -> Cloudflare R2 or Express Static Fallback)
+  app.post('/api/media/upload', applyRateLimit('upload', 25, 60), async (req, res) => {
+    const body = (req.body || {}) as {
+      base64?: string;
+      mimeType?: string;
+      prefix?: string;
+    };
+
+    const allowedMimes: Record<string, string> = {
+      'image/webp': 'webp',
+      'image/jpeg': 'jpg',
+      'image/png': 'png'
+    };
+
+    const ext = body.mimeType ? allowedMimes[body.mimeType] : undefined;
+    if (!ext || typeof body.base64 !== 'string' || !body.base64) {
+      res.status(400).json({ error: 'Valid base64 image payload (webp/jpeg/png) is required.' });
+      return;
+    }
+
+    const cleanBase64 = body.base64.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(cleanBase64, 'base64');
+
+    if (buffer.byteLength === 0 || buffer.byteLength > 300 * 1024) {
+      res.status(413).json({ error: 'Compressed image must be between 1 byte and 300 KB.' });
+      return;
+    }
+
+    const safePrefix = body.prefix === 'proof' ? 'proof' : 'product';
+    const fileName = `${safePrefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+
+    try {
+      const stored = await cloud.uploadMediaObject(buffer, body.mimeType!, fileName);
+      res.status(201).json({
+        url: stored.url,
+        sizeBytes: buffer.byteLength,
+        mimeType: body.mimeType,
+        storageBackend: stored.storageBackend
+      });
+    } catch (err) {
+      console.error('Failed to persist uploaded media:', err);
+      res.status(500).json({ error: 'Unable to store uploaded media file.' });
+    }
+  });
+
+  // Real-time Delivery Slot Availability API (L1/L2 60s TTL + Edge Cache)
+  app.get('/api/slots', async (_req, res) => {
+    const now = new Date();
+    const currentHour = now.getHours();
+    const cacheKey = `slots_${now.toISOString().split('T')[0]}_${currentHour}`;
+    const cached = await cloud.getCached<{
+      days: Array<{ dayOffset: number; isoDate: string; slots: string[] }>;
+    }>(cacheKey);
+
+    res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=60, stale-while-revalidate=120');
+
+    if (cached) {
+      res.setHeader('X-Cache', `HIT-${cached.tier.toUpperCase()}`);
+      res.json(cached.value);
+      return;
+    }
+
+    const allDailySlots = [
+      { id: 'morning_1', label: '6:00 AM - 8:00 AM', startHour: 6 },
+      { id: 'morning_2', label: '8:00 AM - 10:00 AM', startHour: 8 },
+      { id: 'morning_3', label: '10:00 AM - 12:00 PM', startHour: 10 },
+      { id: 'evening_1', label: '4:00 PM - 5:00 PM', startHour: 16 },
+      { id: 'evening_2', label: '5:00 PM - 6:00 PM', startHour: 17 },
+      { id: 'evening_3', label: '6:00 PM - 7:00 PM', startHour: 18 },
+      { id: 'evening_4', label: '7:00 PM - 8:00 PM', startHour: 19 },
+      { id: 'evening_5', label: '8:00 PM - 9:00 PM', startHour: 20 }
+    ];
+
+    const days = [0, 1, 2].map((offset) => {
+      const targetDate = new Date(now);
+      targetDate.setDate(now.getDate() + offset);
+      const slots = allDailySlots.filter((slot) =>
+        offset === 0 ? slot.startHour > currentHour : true
+      );
+      return {
+        dayOffset: offset,
+        isoDate: targetDate.toISOString().split('T')[0],
+        slots: slots.map((s) => s.label)
+      };
+    });
+
+    const payload = { days };
+    await cloud.setCached(cacheKey, payload, 60_000);
+    res.setHeader('X-Cache', 'MISS');
+    res.json(payload);
+  });
+
+  // Pre-Checkout Authoritative Stock, Store Status & Pack-Weight Verification API
+  app.post('/api/orders/verify-stock', applyRateLimit('verify-stock', 60, 60), async (req, res) => {
+    const items = Array.isArray(req.body?.items) ? (req.body.items as VerifyStockItemInput[]) : [];
+    if (items.length === 0) {
+      res.status(400).json({ ok: false, error: 'Cart is empty.' });
+      return;
+    }
+
+    const bootstrap = await cloud.getCatalogBootstrap();
+    if (bootstrap.settings && bootstrap.settings.storeOpen === false) {
+      res.status(409).json({
+        ok: false,
+        storeClosed: true,
+        error: 'Store is currently paused by administration and not accepting new orders.'
+      });
+      return;
+    }
+
+    const liveCatalogMap = new Map<string, { available?: boolean; name?: string }>();
+    for (const prod of bootstrap.products) {
+      if (typeof prod.id === 'string' && prod.id) {
+        liveCatalogMap.set(prod.id, {
+          available: prod.available !== false,
+          name: typeof prod.name === 'string' ? prod.name : undefined
+        });
+      }
+    }
+
+    const unavailableItems: string[] = [];
+    let staleCatalog = false;
+
+    for (const item of items) {
+      const liveProd = item.id ? liveCatalogMap.get(item.id) : undefined;
+      if (liveProd) {
+        if (liveProd.available === false) {
+          unavailableItems.push(liveProd.name || item.name || item.id || 'Item');
+          if (item.available !== false) {
+            staleCatalog = true;
+          }
+        }
+      } else if (item.available === false) {
+        unavailableItems.push(item.name || item.id || 'Item');
+      }
+    }
+
+    const invalidItems = items
+      .filter(
+        (item) =>
+          !Number.isFinite(Number(item.quantity)) ||
+          Number(item.quantity) <= 0 ||
+          !Number.isFinite(Number(item.selectedWeight)) ||
+          Number(item.selectedWeight) <= 0 ||
+          !Number.isFinite(Number(item.pricePerKg)) ||
+          Number(item.pricePerKg) < 0
+      )
+      .map((item) => item.name || item.id || 'Item');
+
+    if (unavailableItems.length > 0 || invalidItems.length > 0) {
+      if (staleCatalog) {
+        await cloud.invalidateCatalogCache();
+      }
+      res.status(409).json({
+        ok: false,
+        staleCatalog,
+        unavailableItems,
+        invalidItems,
+        error:
+          unavailableItems.length > 0
+            ? `Currently out of stock: ${unavailableItems.join(', ')}`
+            : `Invalid weight or quantity for: ${invalidItems.join(', ')}`
+      });
+      return;
+    }
+
+    res.json({ ok: true, verifiedCount: items.length, catalogSource: bootstrap.source });
+  });
+
+  // Server-side Pricing & Order Quote Verification API (L1/L2 30s TTL cached)
+  app.post('/api/orders/quote', applyRateLimit('quote', 90, 60), async (req, res) => {
+    const body = (req.body || {}) as QuoteRequestBody;
+    const items = Array.isArray(body.items) ? body.items.slice(0, 50) : [];
+    const taxRate = Math.max(0, Math.min(50, Number(body.taxRate) || 0));
+    const baseDeliveryFee = Math.max(0, Number(body.baseDeliveryFee) || 0);
+    const freeDeliveryThreshold = Math.max(0, Number(body.freeDeliveryThreshold) || 0);
+    const discountType = body.discountType === 'percent' ? 'percent' : 'flat';
+    const discountValue = Math.max(0, Number(body.discountValue) || 0);
+    const minOrder = Math.max(0, Number(body.minOrder) || 0);
+
+    const normalizedKey = JSON.stringify({
+      items: items.map((i) => ({
+        p: Math.max(0, Number(i.pricePerKg) || 0),
+        w: Math.max(0, Number(i.selectedWeight) || 0),
+        q: Math.max(0, Number(i.quantity) || 0)
+      })),
+      taxRate,
+      baseDeliveryFee,
+      freeDeliveryThreshold,
+      discountType,
+      discountValue,
+      minOrder
+    });
+    const cacheKey = `quote_${normalizedKey}`;
+    const cached = await cloud.getCached<{
+      subtotal: number;
+      taxAmount: number;
+      deliveryFee: number;
+      discount: number;
+      total: number;
+    }>(cacheKey);
+    if (cached) {
+      res.setHeader('X-Cache', `HIT-${cached.tier.toUpperCase()}`);
+      res.json(cached.value);
+      return;
+    }
+
+    const subtotal = items.reduce((sum, item) => {
+      const pricePerKg = Math.max(0, Number(item.pricePerKg) || 0);
+      const weight = Math.max(0, Number(item.selectedWeight) || 0);
+      const qty = Math.max(0, Number(item.quantity) || 0);
+      return sum + (pricePerKg / 1000) * weight * qty;
+    }, 0);
+
+    const taxAmount = Math.round((subtotal * taxRate) / 100);
+    const deliveryFee = subtotal >= freeDeliveryThreshold ? 0 : baseDeliveryFee;
+
+    let discount = 0;
+    if (subtotal >= minOrder && discountValue > 0) {
+      discount =
+        discountType === 'percent'
+          ? Math.round((subtotal * discountValue) / 100)
+          : Math.round(discountValue);
+    }
+
+    const total = Math.max(0, Math.round(subtotal) + taxAmount + deliveryFee - discount);
+    const quote = {
+      subtotal: Math.round(subtotal),
+      taxAmount,
+      deliveryFee,
+      discount,
+      total
+    };
+    await cloud.setCached(cacheKey, quote, 30_000);
+    res.setHeader('X-Cache', 'MISS');
+    res.json(quote);
+  });
+
+  // Multi-Database Relational Archive & SQL Analytics Endpoints (SQLite WAL + Supabase Postgres)
+  app.post('/api/archive/order', applyRateLimit('archive', 120, 60), async (req, res) => {
+    const b = (req.body || {}) as Record<string, unknown>;
+    const id = typeof b.id === 'string' ? b.id.trim().slice(0, 128) : '';
+    const userId = typeof b.userId === 'string' ? b.userId.trim().slice(0, 128) : '';
+    if (!id || !userId) {
+      res.status(400).json({ error: 'Order id and userId are required.' });
+      return;
+    }
+
+    await cloud.archiveOrder({
+      id,
+      userId,
+      city: typeof b.city === 'string' ? b.city.trim().slice(0, 80) : '',
+      total: Math.max(0, Number(b.total) || 0),
+      status: typeof b.status === 'string' ? b.status.slice(0, 32) : 'placed',
+      paymentMethod: typeof b.paymentMethod === 'string' ? b.paymentMethod.slice(0, 16) : 'cod',
+      paymentStatus: typeof b.paymentStatus === 'string' ? b.paymentStatus.slice(0, 20) : 'pending',
+      assignedToUid: typeof b.assignedToUid === 'string' ? b.assignedToUid.slice(0, 128) : '',
+      itemCount: Math.max(0, Number(b.itemCount) || 0),
+      date: typeof b.date === 'string' ? b.date.slice(0, 64) : new Date().toISOString()
+    });
+    res.status(202).json({ ok: true });
+  });
+
+  app.post('/api/archive/ledger', applyRateLimit('archive', 120, 60), async (req, res) => {
+    const b = (req.body || {}) as Record<string, unknown>;
+    const id = typeof b.id === 'string' ? b.id.trim().slice(0, 128) : '';
+    const partnerUid = typeof b.partnerUid === 'string' ? b.partnerUid.trim().slice(0, 128) : '';
+    if (!id || !partnerUid) {
+      res.status(400).json({ error: 'Ledger id and partnerUid are required.' });
+      return;
+    }
+
+    await cloud.archiveLedgerEntry({
+      id,
+      partnerUid,
+      orderId: typeof b.orderId === 'string' ? b.orderId.slice(0, 128) : '',
+      type: typeof b.type === 'string' ? b.type.slice(0, 32) : 'trip_credit',
+      amount: Math.max(0, Number(b.amount) || 0)
+    });
+    res.status(202).json({ ok: true });
+  });
+
+  app.get('/api/analytics/summary', (_req, res) => {
+    res.setHeader('Cache-Control', 'public, max-age=15, stale-while-revalidate=45');
+    res.json(cloud.getSqlAnalyticsSummary());
+  });
+
+  // Explicit 404 for unknown API or missing uploaded media paths so SPA fallback never intercepts them
+  app.all('/api/*', (_req, res) => {
+    res.status(404).json({ error: 'API endpoint not found.' });
+  });
+  app.use('/uploads', (_req, res) => {
+    res.status(404).json({ error: 'Media file not found.' });
+  });
+
+  if (!isProduction) {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: {
+        middlewareMode: true,
+        hmr: false,
+        ws: false
+      },
+      appType: 'spa'
+    });
+    app.get('/@vite/client', async (_req, res, next) => {
+      try {
+        const result = await vite.transformRequest('/@vite/client');
+        if (!result) {
+          next();
+          return;
+        }
+        const safeCode = result.code.replace(
+          'transport.connect(createHMRHandler(handleMessage));',
+          '/* Vite HMR WebSocket disabled in preview */'
+        );
+        res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-store');
+        res.send(safeCode);
+      } catch (err) {
+        next(err);
+      }
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distDir = path.join(__dirname, 'dist');
+    app.use(express.static(distDir));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.join(distDir, 'index.html'));
+    });
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(
+      `FreshVeggie server listening on http://0.0.0.0:${PORT} (${isProduction ? 'production' : 'development'})`
+    );
+  });
+}
+
+startServer().catch((err) => {
+  console.error('Failed to start FreshVeggie server:', err);
+  process.exit(1);
+});

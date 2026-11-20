@@ -135,9 +135,9 @@ export const ProductDetails = () => {
         <button 
           onClick={handleAddToCart}
           disabled={!product.available}
-          className="flex-1 bg-green-600 text-white py-3.5 rounded-xl font-bold hover:bg-green-700 disabled:bg-gray-300 shadow-lg shadow-green-200"
+          className="flex-1 bg-green-600 text-white py-3.5 rounded-xl font-bold hover:bg-green-700 disabled:bg-gray-300 shadow-lg shadow-green-200 disabled:shadow-none"
         >
-          Add to Cart
+          {product.available ? 'Add to Cart' : 'Out of Stock'}
         </button>
       </div>
     </div>

@@ -1,7 +1,9 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { X, User, Truck, FileText, Shield, Phone, AlertCircle } from 'lucide-react';
+import { X, User, Truck, FileText, Shield, Phone, AlertCircle, Smartphone } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { usePWAInstall } from '../hooks/usePWAInstall';
+import { useToast } from '../context/ToastContext';
 
 interface SidebarProps {
   isOpen: boolean;
@@ -10,6 +12,8 @@ interface SidebarProps {
 
 export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
   const { user } = useAuth();
+  const { isInstallable, install } = usePWAInstall();
+  const { showToast } = useToast();
 
   return (
     <>
@@ -33,8 +37,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
         <div className="p-4">
           {user ? (
             <div className="mb-6 p-4 bg-green-50 rounded-xl">
-              <p className="font-bold text-gray-800">{user.name}</p>
-              <p className="text-sm text-gray-500">{user.phone}</p>
+              <p className="font-bold text-gray-800 truncate">{user.name}</p>
+              <p className="text-xs text-gray-500 truncate">
+                {user.phone ? `+${user.phone}` : user.email || 'Signed in customer'}
+              </p>
             </div>
           ) : (
              <div className="mb-6 p-4 bg-gray-50 rounded-xl">
@@ -58,6 +64,22 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
               <Shield size={20} className="text-blue-500" />
               <span className="font-medium text-blue-600">Admin Panel</span>
             </Link>
+
+            <button
+              onClick={async () => {
+                if (isInstallable) {
+                  await install();
+                  onClose();
+                } else {
+                  showToast('To install: open browser menu (⋮) and tap "Install App" or "Add to Home Screen".', 'info');
+                  onClose();
+                }
+              }}
+              className="w-full flex items-center gap-3 px-4 py-3 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-lg font-medium text-left transition-colors"
+            >
+              <Smartphone size={20} className="text-emerald-600" />
+              <span>Install Android App</span>
+            </button>
 
             <div className="my-2 border-t border-gray-100"></div>
 

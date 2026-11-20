@@ -8,6 +8,9 @@ import { Navbar } from './components/Navbar';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { PageLoader } from './components/PageLoader';
 import { OfflineIndicator } from './components/OfflineIndicator';
+import { PWAInstallPrompt } from './components/PWAInstallPrompt';
+import { RealtimeNotifier } from './components/RealtimeNotifier';
+import { RoleGuard } from './components/RoleGuard';
 
 // Lazy load pages for performance optimization
 const Welcome = lazy(() => import('./pages/Welcome').then(module => ({ default: module.Welcome })));
@@ -48,8 +51,12 @@ export default function App() {
           <ToastProvider>
             <StoreProvider>
               <Router>
-                <div className="min-h-screen bg-gray-50 text-gray-900 font-sans">
-                  <Suspense fallback={<PageLoader />}>
+                <RealtimeNotifier />
+                <div className="min-h-screen bg-gray-50 text-gray-900 font-sans flex flex-col">
+                  <PWAInstallPrompt />
+                  <Navbar />
+                  <div className="flex-1">
+                    <Suspense fallback={<PageLoader />}>
                     <Routes>
                       <Route path="/" element={<Welcome />} />
                       <Route path="/home" element={<Home />} />
@@ -72,17 +79,59 @@ export default function App() {
                       {/* Delivery Routes */}
                       <Route path="/delivery/login" element={<DeliveryLogin />} />
                       <Route path="/delivery/register" element={<DeliveryRegister />} />
-                      <Route path="/delivery/dashboard" element={<DeliveryDashboard />} />
-                      <Route path="/delivery/earnings" element={<DeliveryEarnings />} />
-                      <Route path="/delivery/performance" element={<DeliveryPerformance />} />
-                      <Route path="/delivery/order/:id" element={<DeliveryOrderDetails />} />
+                      <Route
+                        path="/delivery/dashboard"
+                        element={
+                          <RoleGuard allowedRole="delivery">
+                            <DeliveryDashboard />
+                          </RoleGuard>
+                        }
+                      />
+                      <Route
+                        path="/delivery/earnings"
+                        element={
+                          <RoleGuard allowedRole="delivery">
+                            <DeliveryEarnings />
+                          </RoleGuard>
+                        }
+                      />
+                      <Route
+                        path="/delivery/performance"
+                        element={
+                          <RoleGuard allowedRole="delivery">
+                            <DeliveryPerformance />
+                          </RoleGuard>
+                        }
+                      />
+                      <Route
+                        path="/delivery/order/:id"
+                        element={
+                          <RoleGuard allowedRole="delivery">
+                            <DeliveryOrderDetails />
+                          </RoleGuard>
+                        }
+                      />
 
-                      {/* Admin Routes */}
-                      <Route path="/admin/login" element={<AdminLogin />} />
-                      <Route path="/admin/dashboard" element={<AdminDashboard />} />
+                      {/* Admin Routes (Isolated from mobile standalone storefronts) */}
+                      <Route
+                        path="/admin/login"
+                        element={
+                          <RoleGuard allowedRole="admin-login">
+                            <AdminLogin />
+                          </RoleGuard>
+                        }
+                      />
+                      <Route
+                        path="/admin/dashboard"
+                        element={
+                          <RoleGuard allowedRole="admin">
+                            <AdminDashboard />
+                          </RoleGuard>
+                        }
+                      />
                     </Routes>
                   </Suspense>
-                  <Navbar />
+                  </div>
                   <OfflineIndicator />
                 </div>
               </Router>
