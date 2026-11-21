@@ -16,7 +16,7 @@ const STEPS = [
 
 export const Orders = () => {
   const { orders, user, firebaseUser, authReady, ensureCustomerProfile, updateOrderStatus } = useAuth();
-  const { addToCart } = useStore();
+  const { addItemsToCart } = useStore();
   const { showToast } = useToast();
   const navigate = useNavigate();
 
@@ -89,9 +89,13 @@ export const Orders = () => {
   };
 
   const handleReorder = (order: typeof orders[0]) => {
-    order.items.forEach((item) => {
-      addToCart(item, item.selectedWeight);
-    });
+    addItemsToCart(
+      order.items.map((item) => ({
+        product: item,
+        weight: item.selectedWeight,
+        quantity: item.quantity || 1
+      }))
+    );
     showToast(`Added ${order.items.length} items to your cart!`, 'success');
     navigate('/cart');
   };

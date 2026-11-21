@@ -1,7 +1,6 @@
 /**
  * Client-side Multi-Server Failover & Non-Blocking Cloud Sync Utilities
- * Supports optional VITE_API_SERVERS comma-separated origins (e.g. Cloudflare Worker + Backup Server)
- * while defaulting cleanly to same-origin ('') first.
+ * Supports both build-time VITE_API_SERVERS and live Admin Server Control Center failover nodes.
  */
 
 const configuredServers = (
@@ -11,7 +10,57 @@ const configuredServers = (
   .map((s) => s.trim().replace(/\/+$/, ''))
   .filter(Boolean);
 
-const API_BASES = ['', ...configuredServers.filter((s) => s !== '')];
+const RUNTIME_ORIGINS_KEY = 'freshveggie_runtime_origins_v1';
+
+const loadRuntimeOrigins = (): string[] => {
+  try {
+    const raw = localStorage.getItem(RUNTIME_ORIGINS_KEY);
+    if (!raw) return ['', ...configuredServers.filter((s) => s !== '')];
+    const parsed = JSON.parse(raw) as string[];
+    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+  } catch {
+    // ignore storage errors
+  }
+  return ['', ...configuredServers.filter((s) => s !== '')];
+};
+
+let activeApiBases: string[] = loadRuntimeOrigins();
+let autoFailoverEnabled = true;
+
+export function syncRuntimeServerNodes(
+  nodes: Array<{ url: string; enabled: boolean }>,
+  autoFailover = true
+): void {
+  autoFailoverEnabled = autoFailover;
+  const normalized = nodes
+    .filter((n) => n.enabled)
+    .map((n) => (n.url || '').trim().replace(/\/+$/, ''));
+  const merged = Array.from(new Set([...normalized, ...configuredServers]));
+  activeApiBases = merged.length > 0 ? merged : [''];
+  try {
+    localStorage.setItem(RUNTIME_ORIGINS_KEY, JSON.stringify(activeApiBases));
+  } catch {
+    // ignore
+  }
+}
+
+export async function refreshRuntimeServerNodes(): Promise<void> {
+  try {
+    const res = await fetch('/api/public/runtime-config', {
+      signal: AbortSignal.timeout(3000)
+    });
+    if (!res.ok) return;
+    const data = (await res.json()) as {
+      autoServerFailover?: boolean;
+      serverNodes?: Array<{ url: string; enabled: boolean }>;
+    };
+    if (Array.isArray(data.serverNodes)) {
+      syncRuntimeServerNodes(data.serverNodes, data.autoServerFailover !== false);
+    }
+  } catch {
+    // non-fatal
+  }
+}
 
 export async function apiFetch(
   path: string,
@@ -19,10 +68,11 @@ export async function apiFetch(
   timeoutMs = 5500
 ): Promise<Response> {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  const basesToTry = autoFailoverEnabled ? activeApiBases : [activeApiBases[0] ?? ''];
   let lastError: unknown = null;
   let lastResponse: Response | null = null;
 
-  for (const base of API_BASES) {
+  for (const base of basesToTry) {
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), timeoutMs);
 
@@ -33,8 +83,7 @@ export async function apiFetch(
       });
       window.clearTimeout(timer);
 
-      // Fail over to backup server if gateway/origin returns 502/503/504
-      if (response.status >= 502 && response.status <= 504 && base !== API_BASES[API_BASES.length - 1]) {
+      if (response.status >= 502 && response.status <= 504 && base !== basesToTry[basesToTry.length - 1]) {
         lastResponse = response;
         continue;
       }
@@ -47,6 +96,20 @@ export async function apiFetch(
 
   if (lastResponse) return lastResponse;
   throw lastError instanceof Error ? lastError : new Error('All configured API servers are unreachable.');
+}
+
+export async function adminApiFetch(
+  path: string,
+  idToken: string,
+  init: RequestInit = {},
+  timeoutMs = 8000
+): Promise<Response> {
+  const headers = new Headers(init.headers || {});
+  headers.set('Authorization', `Bearer ${idToken}`);
+  if (init.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  return apiFetch(path, { ...init, headers }, timeoutMs);
 }
 
 export function invalidateCatalogCache(): void {

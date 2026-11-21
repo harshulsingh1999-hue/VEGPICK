@@ -5,19 +5,46 @@ import {
   CreditCard, Tag, BarChart3, MessageSquare, Settings, LogOut, 
   Menu, X, Shield, Plus, Search, Edit2, Trash2, Check, CheckCircle2,
   AlertTriangle, Filter, Eye, Phone, MapPin, IndianRupee, ArrowUpRight, Sprout,
-  Download, Upload, Monitor, Camera
+  Download, Upload, Monitor, Camera, Database, Server, Calendar, Clock, Landmark, Smartphone
 } from 'lucide-react';
+import { format } from 'date-fns';
 import { useAuth } from '../../context/AuthContext';
 import { useStore } from '../../context/StoreContext';
 import { useDelivery } from '../../context/DeliveryContext';
-import { formatCurrency } from '../../lib/utils';
+import {
+  formatCurrency,
+  formatPaymentMethodLabel,
+  getAdminSettlementSummary,
+  getOrderBillingBreakdown,
+  isOnlinePaymentMethod
+} from '../../lib/utils';
 import { CATEGORIES, Product, Coupon, DeliveryPersonnel, Order } from '../../lib/data';
 import { uploadCompressedMedia } from '../../lib/imageUtils';
 import { apiFetch } from '../../lib/apiClient';
 import { useToast } from '../../context/ToastContext';
+import { AreaPincodeControlCenter } from '../../components/admin/AreaPincodeControlCenter';
+import { DatabaseControlCenter } from '../../components/admin/DatabaseControlCenter';
+import { ServerApiControlCenter } from '../../components/admin/ServerApiControlCenter';
+
+const SLOT_TIME_WINDOWS = [
+  '6:00 AM - 8:00 AM',
+  '8:00 AM - 10:00 AM',
+  '10:00 AM - 12:00 PM',
+  '12:00 PM - 2:00 PM',
+  '2:00 PM - 4:00 PM',
+  '4:00 PM - 5:00 PM',
+  '5:00 PM - 6:00 PM',
+  '6:00 PM - 7:00 PM',
+  '7:00 PM - 8:00 PM',
+  '8:00 PM - 9:00 PM',
+  'Standard Delivery'
+];
 
 const TABS = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { id: 'areas', label: 'Area & Pincode Control', icon: MapPin },
+  { id: 'databases', label: 'Database Control', icon: Database },
+  { id: 'servers', label: 'Server & API Control', icon: Server },
   { id: 'customers', label: 'Customer Management', icon: Users },
   { id: 'delivery', label: 'Delivery Men Management', icon: Truck },
   { id: 'orders', label: 'Order Management', icon: ShoppingCart },
@@ -51,6 +78,7 @@ export const AdminDashboard = () => {
     loadingMoreOrders,
     loadMoreOrders,
     updateOrderStatus,
+    updateOrderDetails,
     assignOrderToDelivery,
     adminList,
     grantAdminAccess,
@@ -70,12 +98,73 @@ export const AdminDashboard = () => {
     toggleCoupon,
     complaints,
     updateComplaintStatus,
+    serviceAreas,
+    checkPincodeServiceability,
     appSettings,
     updateAppSettings
   } = useStore();
   const { deliveryMen, walletLedger, addDeliveryBoy, removeDeliveryBoy, updateDeliveryBoy } = useDelivery();
   const { showToast } = useToast();
   const [uploadingProductImg, setUploadingProductImg] = useState(false);
+
+  const driverZoneOptions = React.useMemo(() => {
+    const normalize = (val: string) => val.trim().slice(0, 80);
+    const list: string[] = [];
+    const seen = new Set<string>();
+    const addZone = (raw: string) => {
+      const zone = normalize(raw);
+      if (!zone) return;
+      const key = zone.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        list.push(zone);
+      }
+    };
+
+    // 1. Configured Service Areas & Pincodes
+    serviceAreas.forEach((a) => {
+      addZone(`${a.name} (${a.pincode})`);
+      if (a.city && a.city.trim().toLowerCase() !== a.name.trim().toLowerCase()) {
+        addZone(`${a.city} (${a.pincode})`);
+      }
+    });
+
+    // 2. Booked Customer Order Areas & Pincodes (e.g. Gwalior (474011))
+    allOrders.forEach((o) => {
+      const city = (o.address?.city || '').trim();
+      const zip = (o.address?.zip || '').trim();
+      if (city && zip) addZone(`${city} (${zip})`);
+      else if (city) addZone(city);
+      else if (zip) addZone(`Pincode ${zip}`);
+    });
+
+    // 3. Registered Customer Saved Addresses
+    allUsers.forEach((u) => {
+      (u.addresses || []).forEach((addr) => {
+        const city = (addr.city || '').trim();
+        const zip = (addr.zip || '').trim();
+        if (city && zip) addZone(`${city} (${zip})`);
+      });
+    });
+
+    // 4. Existing Delivery Partner Zones
+    deliveryMen.forEach((d) => {
+      if (d.area) addZone(d.area);
+    });
+
+    // 5. Fallback baseline hubs
+    ['Central Zone', 'Sector 14', 'Cyber City', 'Green Park', 'Dwarka', 'Rohini'].forEach(addZone);
+    return list;
+  }, [serviceAreas, allOrders, allUsers, deliveryMen]);
+
+  const driverMatchesOrderArea = (driverArea: string, order: Order): boolean => {
+    const normArea = (driverArea || '').toLowerCase();
+    const zip = (order.address?.zip || '').trim().toLowerCase();
+    const city = (order.address?.city || '').trim().toLowerCase();
+    if (zip && normArea.includes(zip)) return true;
+    if (city && normArea.includes(city)) return true;
+    return false;
+  };
 
   const downloadCsv = (filename: string, headers: string[], rows: Array<Array<string | number>>) => {
     const escapeCell = (val: string | number) => {
@@ -158,18 +247,22 @@ export const AdminDashboard = () => {
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
   const selectedCustomer = allUsers.find((u) => u.id === selectedCustomerId) || null;
 
-  // Delivery boys modal
+  // Delivery boys modal & inline custom zone state
   const [showDriverModal, setShowDriverModal] = useState(false);
+  const [useCustomDriverZone, setUseCustomDriverZone] = useState(false);
+  const [customDriverZone, setCustomDriverZone] = useState('');
+  const [editingZoneDriverId, setEditingZoneDriverId] = useState<string | null>(null);
+  const [editingZoneText, setEditingZoneText] = useState('');
   const [driverForm, setDriverForm] = useState({
     uid: '',
     email: '',
     name: '',
     phone: '',
-    area: 'Sector 14',
+    area: 'Central Zone',
     vehicle: 'Motorcycle'
   });
 
-  // Orders filters, bulk selection & modal
+  // Orders filters, bulk selection & modals
   const [orderStatusFilter, setOrderStatusFilter] = useState('All');
   const [orderSearch, setOrderSearch] = useState('');
   const [viewingOrderId, setViewingOrderId] = useState<string | null>(null);
@@ -177,6 +270,71 @@ export const AdminDashboard = () => {
   const [bulkDriverUid, setBulkDriverUid] = useState('');
   const [bulkBusy, setBulkBusy] = useState(false);
   const viewingOrder = allOrders.find((o) => o.id === viewingOrderId) || null;
+
+  const [editingOrder, setEditingOrder] = useState<Order | null>(null);
+  const [savingOrderEdit, setSavingOrderEdit] = useState(false);
+  const [editOrderForm, setEditOrderForm] = useState({
+    orderDate: '',
+    orderTime: '',
+    slotDate: '',
+    slotWindow: '8:00 AM - 10:00 AM',
+    customSlotText: '',
+    customerName: '',
+    customerPhone: '',
+    addressLabel: 'Home',
+    street: '',
+    city: '',
+    zip: ''
+  });
+
+  const formatOrderDateTime = (rawDate?: string): string => {
+    if (!rawDate) return '—';
+    const d = new Date(rawDate);
+    if (Number.isNaN(d.getTime())) return rawDate;
+    return format(d, 'dd MMM yyyy, hh:mm a');
+  };
+
+  const openEditOrderModal = (order: Order) => {
+    const parsedDate = order.date ? new Date(order.date) : new Date();
+    const safeDate = Number.isNaN(parsedDate.getTime()) ? new Date() : parsedDate;
+    const localDateIso = format(safeDate, 'yyyy-MM-dd');
+    const localTimeIso = format(safeDate, 'HH:mm');
+
+    const rawSlot = (order.deliverySlot || '').trim();
+    const sepIndex = rawSlot.indexOf(' - ');
+    let initialSlotDate = localDateIso;
+    let matchedWindow = '__custom__';
+
+    if (sepIndex !== -1) {
+      const datePart = rawSlot.slice(0, sepIndex).trim();
+      const windowPart = rawSlot.slice(sepIndex + 3).trim();
+      const currentYear = safeDate.getFullYear();
+      const parsedSlotDate = new Date(`${datePart} ${currentYear}`);
+      if (!Number.isNaN(parsedSlotDate.getTime())) {
+        initialSlotDate = format(parsedSlotDate, 'yyyy-MM-dd');
+      }
+      if (SLOT_TIME_WINDOWS.includes(windowPart)) {
+        matchedWindow = windowPart;
+      }
+    } else if (SLOT_TIME_WINDOWS.includes(rawSlot)) {
+      matchedWindow = rawSlot;
+    }
+
+    setEditOrderForm({
+      orderDate: localDateIso,
+      orderTime: localTimeIso,
+      slotDate: initialSlotDate,
+      slotWindow: matchedWindow,
+      customSlotText: rawSlot || `${format(safeDate, 'EEE, MMM d')} - Standard Delivery`,
+      customerName: order.customerName || '',
+      customerPhone: order.customerPhone || '',
+      addressLabel: order.address?.label || 'Home',
+      street: order.address?.street || '',
+      city: order.address?.city || '',
+      zip: order.address?.zip || ''
+    });
+    setEditingOrder(order);
+  };
 
   // Coupons modal
   const [showCouponModal, setShowCouponModal] = useState(false);
@@ -196,6 +354,8 @@ export const AdminDashboard = () => {
   // Settings local state
   const [settingsForm, setSettingsForm] = useState({ ...appSettings });
   const [settingsSaved, setSettingsSaved] = useState(false);
+  const [savingBankSettings, setSavingBankSettings] = useState(false);
+  const [bankSettingsSaved, setBankSettingsSaved] = useState(false);
   const [newAdminUid, setNewAdminUid] = useState('');
   const [newAdminContact, setNewAdminContact] = useState('');
   const [savingAdmin, setSavingAdmin] = useState(false);
@@ -236,6 +396,18 @@ export const AdminDashboard = () => {
       case 'dashboard':
         return (
           <div className="space-y-6 animate-in fade-in">
+            {isAdmin && !isBootstrappedAdmin && (
+              <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-3 text-xs text-amber-900">
+                <AlertTriangle size={18} className="text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-bold">Delegated Staff Admin Session</p>
+                  <p className="mt-0.5">
+                    To view full customer, order, and fleet directories across the database, sign in with the Store Owner Google account in the Admin Portal per Firestore security rules.
+                  </p>
+                </div>
+              </div>
+            )}
+
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
               <div>
                 <h2 className="text-2xl font-bold text-gray-800">Store Performance Overview</h2>
@@ -260,7 +432,15 @@ export const AdminDashboard = () => {
                   <Plus size={16} /> Add Product
                 </button>
                 <button
-                  onClick={() => setShowDriverModal(true)}
+                  onClick={() => {
+                    setUseCustomDriverZone(false);
+                    setCustomDriverZone('');
+                    setDriverForm((prev) => ({
+                      ...prev,
+                      area: driverZoneOptions[0] || 'Central Zone'
+                    }));
+                    setShowDriverModal(true);
+                  }}
                   className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm transition"
                 >
                   <Plus size={16} /> Add Delivery Partner
@@ -366,9 +546,31 @@ export const AdminDashboard = () => {
                     {allOrders.slice(0, 5).map(o => (
                       <tr key={o.id} className="hover:bg-gray-50/80 transition">
                         <td className="p-3 font-bold text-gray-900">#{o.id}</td>
-                        <td className="p-3 font-medium text-gray-800">{o.customerName || 'Customer'}</td>
-                        <td className="p-3 text-xs text-gray-500">{o.items?.length || 0} items</td>
-                        <td className="p-3 font-bold text-gray-900">{formatCurrency(o.total)}</td>
+                        <td className="p-3 font-medium text-gray-800">
+                          <span>{o.customerName || 'Customer'}</span>
+                          {o.address?.city && (
+                            <span className="block text-[11px] text-gray-400 font-normal">
+                              {o.address.city}{o.address.zip ? ` (${o.address.zip})` : ''}
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-3 text-xs text-gray-500">
+                          <button
+                            type="button"
+                            onClick={() => setViewingOrderId(o.id)}
+                            className="inline-flex items-center gap-1 text-blue-600 hover:underline font-semibold"
+                          >
+                            <Eye size={13} /> {o.items?.length || 0} items
+                          </button>
+                        </td>
+                        <td className="p-3 font-bold text-gray-900">
+                          {formatCurrency(o.total)}
+                          {o.couponCode && (
+                            <span className="block text-[10px] font-bold text-green-700">
+                              🏷️ {o.couponCode} (-{formatCurrency(o.discountAmount || 0)})
+                            </span>
+                          )}
+                        </td>
                         <td className="p-3 uppercase text-xs font-bold">{o.paymentMethod}</td>
                         <td className="p-3">
                           <span className={`px-2 py-0.5 rounded text-[11px] font-bold ${
@@ -515,12 +717,44 @@ export const AdminDashboard = () => {
                 <p className="text-sm text-gray-500">Approve registered partners, assign delivery zones, and monitor live shifts.</p>
               </div>
               <button
-                onClick={() => setShowDriverModal(true)}
+                onClick={() => {
+                  setUseCustomDriverZone(false);
+                  setCustomDriverZone('');
+                  setDriverForm((prev) => ({
+                    ...prev,
+                    area: driverZoneOptions[0] || 'Central Zone'
+                  }));
+                  setShowDriverModal(true);
+                }}
                 className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 shadow-sm transition"
               >
                 <Plus size={18} /> Add Delivery Partner
               </button>
             </div>
+
+            {driverZoneOptions.length > 0 && (
+              <div className="bg-blue-50/70 border border-blue-100 rounded-2xl p-3.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="font-bold text-blue-900 flex items-center gap-1.5">
+                  <MapPin size={14} className="text-blue-600" />
+                  Synced Dispatch Areas ({driverZoneOptions.length}):
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {driverZoneOptions.slice(0, 10).map((z) => (
+                    <span
+                      key={z}
+                      className="px-2 py-0.5 rounded-lg bg-white border border-blue-200 text-blue-800 font-semibold text-[11px]"
+                    >
+                      {z}
+                    </span>
+                  ))}
+                  {driverZoneOptions.length > 10 && (
+                    <span className="text-[11px] font-bold text-blue-700 px-1">
+                      +{driverZoneOptions.length - 10} more
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
 
             {deliveryMen.length === 0 && (
               <div className="bg-white rounded-2xl border border-gray-100 p-8 text-center text-gray-500 text-sm">
@@ -557,27 +791,73 @@ export const AdminDashboard = () => {
                   </div>
 
                   <div className="space-y-2 text-xs bg-gray-50 p-3 rounded-xl text-gray-600">
-                    <div className="flex justify-between items-center">
-                      <span className="font-medium text-gray-400">Assigned Area:</span>
-                      <select
-                        value={driver.area}
-                        onChange={async (e) => {
-                          try {
-                            await updateDeliveryBoy(driver.id, { area: e.target.value });
-                            showToast(`Assigned ${driver.name} to ${e.target.value}`, 'success');
-                          } catch {
-                            showToast('Unable to update assigned area.', 'error');
-                          }
-                        }}
-                        className="bg-white border border-gray-200 rounded px-2 py-1 font-bold text-gray-800 outline-none"
-                      >
-                        <option value="Sector 14">Sector 14</option>
-                        <option value="Cyber City">Cyber City</option>
-                        <option value="Green Park">Green Park</option>
-                        <option value="Dwarka">Dwarka</option>
-                        <option value="Rohini">Rohini</option>
-                        <option value="Central Zone">Central Zone</option>
-                      </select>
+                    <div className="space-y-1.5">
+                      <div className="flex justify-between items-center gap-2">
+                        <span className="font-medium text-gray-400 shrink-0">Assigned Area:</span>
+                        <select
+                          value={driver.area}
+                          onChange={async (e) => {
+                            if (e.target.value === '__custom__') {
+                              setEditingZoneDriverId(driver.id);
+                              setEditingZoneText(driver.area || '');
+                              return;
+                            }
+                            try {
+                              await updateDeliveryBoy(driver.id, { area: e.target.value });
+                              showToast(`Assigned ${driver.name} to ${e.target.value}`, 'success');
+                            } catch {
+                              showToast('Unable to update assigned area.', 'error');
+                            }
+                          }}
+                          className="bg-white border border-gray-200 rounded px-2 py-1 font-bold text-gray-800 outline-none max-w-[185px]"
+                        >
+                          {Array.from(new Set([driver.area, ...driverZoneOptions])).filter(Boolean).map((zone) => (
+                            <option key={zone} value={zone}>
+                              {zone}
+                            </option>
+                          ))}
+                          <option value="__custom__">+ Type Custom Area / Pincode...</option>
+                        </select>
+                      </div>
+                      {editingZoneDriverId === driver.id && (
+                        <div className="flex items-center gap-1.5 pt-1">
+                          <input
+                            type="text"
+                            maxLength={80}
+                            placeholder="e.g. Gwalior (474011)"
+                            value={editingZoneText}
+                            onChange={(e) => setEditingZoneText(e.target.value)}
+                            className="flex-1 bg-white border border-blue-300 rounded-lg px-2 py-1 text-xs font-semibold text-gray-800 outline-none focus:ring-2 focus:ring-blue-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const cleaned = editingZoneText.trim().slice(0, 80);
+                              if (!cleaned) {
+                                showToast('Enter a valid city, area, or pincode.', 'error');
+                                return;
+                              }
+                              try {
+                                await updateDeliveryBoy(driver.id, { area: cleaned });
+                                showToast(`Assigned ${driver.name} to ${cleaned}`, 'success');
+                                setEditingZoneDriverId(null);
+                              } catch {
+                                showToast('Unable to save custom area.', 'error');
+                              }
+                            }}
+                            className="px-2.5 py-1 bg-blue-600 text-white rounded-lg font-bold text-[11px]"
+                          >
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingZoneDriverId(null)}
+                            className="px-2 py-1 bg-gray-200 text-gray-700 rounded-lg font-bold text-[11px]"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      )}
                     </div>
                     <div className="flex justify-between">
                       <span className="font-medium text-gray-400">Vehicle:</span>
@@ -659,10 +939,19 @@ export const AdminDashboard = () => {
 
       // 4. Order Management
       case 'orders':
+        const qTerm = orderSearch.trim().toLowerCase();
         const filteredOrdersList = allOrders.filter(o => {
           const matchesStatus = orderStatusFilter === 'All' || o.status === orderStatusFilter;
-          const matchesSearch = o.id.toLowerCase().includes(orderSearch.toLowerCase()) ||
-                                (o.customerName && o.customerName.toLowerCase().includes(orderSearch.toLowerCase()));
+          const matchesSearch =
+            !qTerm ||
+            o.id.toLowerCase().includes(qTerm) ||
+            (o.customerName && o.customerName.toLowerCase().includes(qTerm)) ||
+            (o.customerPhone && o.customerPhone.toLowerCase().includes(qTerm)) ||
+            (o.address?.street && o.address.street.toLowerCase().includes(qTerm)) ||
+            (o.address?.city && o.address.city.toLowerCase().includes(qTerm)) ||
+            (o.address?.zip && o.address.zip.toLowerCase().includes(qTerm)) ||
+            (o.deliverySlot && o.deliverySlot.toLowerCase().includes(qTerm)) ||
+            formatOrderDateTime(o.date).toLowerCase().includes(qTerm);
           return matchesStatus && matchesSearch;
         });
 
@@ -677,10 +966,10 @@ export const AdminDashboard = () => {
               <div className="flex gap-2 w-full sm:w-auto">
                 <input
                   type="text"
-                  placeholder="Search order # or customer..."
+                  placeholder="Search #, customer, phone, address, slot..."
                   value={orderSearch}
                   onChange={e => setOrderSearch(e.target.value)}
-                  className="px-3 py-2 bg-white border border-gray-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                  className="px-3 py-2 bg-white border border-gray-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500 w-full sm:w-72"
                 />
               </div>
             </div>
@@ -718,14 +1007,29 @@ export const AdminDashboard = () => {
                     disabled={bulkBusy}
                     className="bg-white border border-blue-200 rounded-lg px-2.5 py-1.5 text-xs font-medium text-gray-800 outline-none"
                   >
-                    <option value="">-- Assign Approved Rider --</option>
-                    {deliveryMen
-                      .filter((d) => d.isApproved)
-                      .map((d) => (
-                        <option key={d.uid} value={d.uid}>
-                          {d.name} ({d.area})
-                        </option>
-                      ))}
+                    <option value="">-- Assign Rider --</option>
+                    {deliveryMen.filter((d) => d.isApproved).length > 0 && (
+                      <optgroup label="Approved Partners">
+                        {deliveryMen
+                          .filter((d) => d.isApproved)
+                          .map((d) => (
+                            <option key={d.uid} value={d.uid}>
+                              {d.name} ({d.area}) {d.isOnline ? '🟢' : '⚪'}
+                            </option>
+                          ))}
+                      </optgroup>
+                    )}
+                    {deliveryMen.filter((d) => !d.isApproved).length > 0 && (
+                      <optgroup label="Pending Approval (Auto-Approves)">
+                        {deliveryMen
+                          .filter((d) => !d.isApproved)
+                          .map((d) => (
+                            <option key={d.uid} value={d.uid}>
+                              {d.name} ({d.area}) [Pending]
+                            </option>
+                          ))}
+                      </optgroup>
+                    )}
                   </select>
                   <button
                     type="button"
@@ -735,6 +1039,9 @@ export const AdminDashboard = () => {
                       if (!chosenDriver) return;
                       setBulkBusy(true);
                       try {
+                        if (!chosenDriver.isApproved) {
+                          await updateDeliveryBoy(chosenDriver.id, { isApproved: true });
+                        }
                         await Promise.all(
                           selectedOrderIds.map((oid) =>
                             assignOrderToDelivery(
@@ -746,7 +1053,7 @@ export const AdminDashboard = () => {
                           )
                         );
                         showToast(
-                          `Assigned ${selectedOrderIds.length} orders to ${chosenDriver.name}`,
+                          `${!chosenDriver.isApproved ? 'Approved & assigned' : 'Assigned'} ${selectedOrderIds.length} orders to ${chosenDriver.name}`,
                           'success'
                         );
                         setSelectedOrderIds([]);
@@ -790,14 +1097,18 @@ export const AdminDashboard = () => {
                       );
                       downloadCsv(
                         `freshveggie_selected_orders_${new Date().toISOString().split('T')[0]}.csv`,
-                        ['Order ID', 'Customer', 'Phone', 'City', 'Total', 'Payment', 'Status'],
+                        ['Order ID', 'Order Date', 'Delivery Slot', 'Customer', 'Phone', 'Address', 'City', 'Pincode', 'Total', 'Payment', 'Status'],
                         picked.map((o) => [
                           o.id,
+                          formatOrderDateTime(o.date),
+                          o.deliverySlot || '',
                           o.customerName,
                           o.customerPhone,
+                          o.address?.street || '',
                           o.address?.city || '',
+                          o.address?.zip || '',
                           o.total,
-                          o.paymentMethod,
+                          formatPaymentMethodLabel(o.paymentMethod),
                           o.status
                         ])
                       );
@@ -870,62 +1181,155 @@ export const AdminDashboard = () => {
                         </td>
                         <td className="p-4">
                           <p className="font-bold text-gray-900">#{order.id}</p>
-                          <p className="text-xs text-gray-400">{order.deliverySlot}</p>
+                          <p className="text-[11px] text-gray-500 font-medium">{formatOrderDateTime(order.date)}</p>
+                          <p className="text-[11px] text-blue-700 font-semibold mt-0.5">{order.deliverySlot}</p>
                         </td>
 
                         <td className="p-4">
                           <p className="font-bold text-gray-800">{order.customerName || 'Customer'}</p>
                           <p className="text-xs text-gray-500">
-                            {order.address?.street ? `${order.address.street}, ${order.address.city}` : 'Main Address'}
+                            {order.address?.street
+                              ? `${order.address.street}, ${order.address.city || ''} ${order.address.zip ? `- ${order.address.zip}` : ''}`.trim()
+                              : 'Main Address'}
                           </p>
+                          {order.customerPhone && (
+                            <p className="text-[11px] text-gray-400 font-mono">+{order.customerPhone}</p>
+                          )}
                         </td>
 
                         <td className="p-4 text-xs text-gray-700">
-                          <button
-                            onClick={() => setViewingOrderId(order.id)}
-                            className="inline-flex items-center gap-1 text-blue-600 hover:underline font-semibold"
-                          >
-                            <Eye size={13} /> {order.items?.length || 0} items
-                          </button>
+                          <div className="flex flex-col items-start gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setViewingOrderId(order.id)}
+                              className="inline-flex items-center gap-1 text-blue-600 hover:underline font-semibold"
+                            >
+                              <Eye size={13} /> {order.items?.length || 0} items &amp; bill
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => openEditOrderModal(order)}
+                              className="inline-flex items-center gap-1 text-[11px] font-bold text-gray-700 bg-gray-100 hover:bg-blue-50 hover:text-blue-700 border border-gray-200 hover:border-blue-200 px-2 py-1 rounded-lg transition"
+                            >
+                              <Edit2 size={11} /> Edit Details
+                            </button>
+                          </div>
                         </td>
 
                         <td className="p-4">
-                          <span className="font-bold text-gray-900">{formatCurrency(order.total)}</span>
-                          <span className="block text-[10px] uppercase font-bold text-gray-400">
-                            {order.paymentMethod} • {order.paymentStatus || 'pending'}
-                          </span>
+                          {(() => {
+                            const b = getOrderBillingBreakdown(order, appSettings);
+                            return (
+                              <div className="space-y-0.5">
+                                <span className="font-bold text-gray-900">{formatCurrency(b.grandTotal)}</span>
+                                <span className="block text-[10px] text-gray-500">
+                                  Sub {formatCurrency(b.subtotal)} + GST {formatCurrency(b.taxAmount)} + Del {b.deliveryFee === 0 ? 'Free' : formatCurrency(b.deliveryFee)}
+                                </span>
+                                {(b.discountAmount > 0 || b.couponCode) && (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-green-700 bg-green-50 border border-green-200 px-1.5 py-0.5 rounded">
+                                    <Tag size={10} /> {b.couponCode || 'COUPON'} (-{formatCurrency(b.discountAmount)})
+                                  </span>
+                                )}
+                                <span className="block text-[10px] font-bold text-gray-500">
+                                  {formatPaymentMethodLabel(order.paymentMethod)}
+                                  {order.cardLast4 ? ` (•••• ${order.cardLast4})` : ''} •{' '}
+                                  <span className="uppercase">{order.paymentStatus || 'pending'}</span>
+                                </span>
+                                {order.paymentReference && (
+                                  <span className="block text-[10px] font-mono text-blue-700 truncate max-w-[190px]">
+                                    Ref: {order.paymentReference}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </td>
 
                         <td className="p-4">
-                          <select
-                            value={order.assignedToUid || ''}
-                            onChange={async (e) => {
-                              const chosenDriver = deliveryMen.find(d => d.uid === e.target.value);
-                              if (chosenDriver) {
-                                try {
-                                  await assignOrderToDelivery(
-                                    order.id,
-                                    chosenDriver.uid,
-                                    chosenDriver.name,
-                                    chosenDriver.partnerCode
-                                  );
-                                  showToast(`Assigned #${order.id} to ${chosenDriver.name}`, 'success');
-                                } catch {
-                                  showToast('Unable to assign delivery partner.', 'error');
-                                }
-                              }
-                            }}
-                            className="bg-gray-50 border border-gray-200 rounded-lg p-1.5 text-xs font-medium text-gray-800 outline-none"
-                          >
-                            <option value="">-- Assign Partner --</option>
-                            {deliveryMen
-                              .filter(d => d.isApproved)
-                              .map(d => (
-                                <option key={d.uid} value={d.uid}>
-                                  {d.name} ({d.area}) {d.isOnline ? '🟢' : '⚪'}
-                                </option>
-                              ))}
-                          </select>
+                          {deliveryMen.length === 0 ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveTab('delivery');
+                                setDriverForm((prev) => ({
+                                  ...prev,
+                                  area:
+                                    order.address?.city && order.address?.zip
+                                      ? `${order.address.city} (${order.address.zip})`.slice(0, 80)
+                                      : prev.area
+                                }));
+                                setShowDriverModal(true);
+                              }}
+                              className="text-xs font-bold text-blue-600 hover:underline"
+                            >
+                              + Add Partner for {order.address?.zip || order.address?.city || 'Area'}
+                            </button>
+                          ) : (
+                            (() => {
+                              const sorted = [...deliveryMen].sort((a, b) => {
+                                const aMatch = driverMatchesOrderArea(a.area, order) ? 1 : 0;
+                                const bMatch = driverMatchesOrderArea(b.area, order) ? 1 : 0;
+                                return bMatch - aMatch;
+                              });
+                              const approvedList = sorted.filter((d) => d.isApproved);
+                              const pendingList = sorted.filter((d) => !d.isApproved);
+
+                              return (
+                                <select
+                                  value={order.assignedToUid || ''}
+                                  onChange={async (e) => {
+                                    const chosenDriver = deliveryMen.find(d => d.uid === e.target.value);
+                                    if (chosenDriver) {
+                                      try {
+                                        if (!chosenDriver.isApproved) {
+                                          await updateDeliveryBoy(chosenDriver.id, { isApproved: true });
+                                        }
+                                        await assignOrderToDelivery(
+                                          order.id,
+                                          chosenDriver.uid,
+                                          chosenDriver.name,
+                                          chosenDriver.partnerCode
+                                        );
+                                        showToast(
+                                          `${!chosenDriver.isApproved ? 'Approved & assigned' : 'Assigned'} #${order.id} to ${chosenDriver.name}`,
+                                          'success'
+                                        );
+                                      } catch {
+                                        showToast('Unable to assign delivery partner.', 'error');
+                                      }
+                                    }
+                                  }}
+                                  className="bg-gray-50 border border-gray-200 rounded-lg p-1.5 text-xs font-medium text-gray-800 outline-none max-w-[210px]"
+                                >
+                                  <option value="">-- Assign Partner --</option>
+                                  {approvedList.length > 0 && (
+                                    <optgroup label="Approved Partners">
+                                      {approvedList.map(d => {
+                                        const isZoneMatch = driverMatchesOrderArea(d.area, order);
+                                        return (
+                                          <option key={d.uid} value={d.uid}>
+                                            {isZoneMatch ? '★ ' : ''}{d.name} ({d.area}) {d.isOnline ? '🟢' : '⚪'}
+                                          </option>
+                                        );
+                                      })}
+                                    </optgroup>
+                                  )}
+                                  {pendingList.length > 0 && (
+                                    <optgroup label="Pending Approval (Auto-Approves)">
+                                      {pendingList.map(d => {
+                                        const isZoneMatch = driverMatchesOrderArea(d.area, order);
+                                        return (
+                                          <option key={d.uid} value={d.uid}>
+                                            {isZoneMatch ? '★ ' : ''}{d.name} ({d.area}) [Pending]
+                                          </option>
+                                        );
+                                      })}
+                                    </optgroup>
+                                  )}
+                                </select>
+                              );
+                            })()
+                          )}
                         </td>
 
                         <td className="p-4">
@@ -1138,25 +1542,86 @@ export const AdminDashboard = () => {
         const codTotal = activeOrdersList.filter(o => o.paymentMethod === 'cod').reduce((s, o) => s + o.total, 0);
         const codPendingTotal = activeOrdersList.filter(o => o.paymentMethod === 'cod' && o.paymentStatus !== 'collected').reduce((s, o) => s + o.total, 0);
         const upiTotal = activeOrdersList.filter(o => o.paymentMethod === 'upi').reduce((s, o) => s + o.total, 0);
+        const cardTotal = activeOrdersList.filter(o => o.paymentMethod === 'debit_card' || o.paymentMethod === 'credit_card').reduce((s, o) => s + o.total, 0);
+        const bankTransferTotal = activeOrdersList.filter(o => o.paymentMethod === 'bank_transfer').reduce((s, o) => s + o.total, 0);
+        const digitalBankTotal = activeOrdersList.filter(o => isOnlinePaymentMethod(o.paymentMethod)).reduce((s, o) => s + o.total, 0);
+        const merchantSettlementSummary = getAdminSettlementSummary(settingsForm);
+
+        const handleSaveBankAndUpi = async (e: React.FormEvent) => {
+          e.preventDefault();
+          const trimmedUpi = (settingsForm.upiId || '').trim();
+          const trimmedIfsc = (settingsForm.bankIfscCode || '').trim().toUpperCase();
+          const trimmedAcc = (settingsForm.bankAccountNumber || '').replace(/\s+/g, '').trim();
+
+          if (trimmedUpi && !trimmedUpi.includes('@')) {
+            showToast('Enter a valid UPI ID (example: merchant@okaxis).', 'error');
+            return;
+          }
+          if (trimmedIfsc && !/^[A-Z]{4}0[A-Z0-9]{6}$/.test(trimmedIfsc)) {
+            showToast('IFSC Code must be 11 characters (e.g. SBIN0001234).', 'error');
+            return;
+          }
+          if (trimmedAcc && !/^[A-Za-z0-9-]{6,34}$/.test(trimmedAcc)) {
+            showToast('Bank Account Number must be 6 to 34 alphanumeric characters.', 'error');
+            return;
+          }
+          if (
+            !settingsForm.acceptUpi &&
+            !settingsForm.acceptDebitCard &&
+            !settingsForm.acceptCreditCard &&
+            !settingsForm.acceptBankTransfer &&
+            !settingsForm.acceptCod
+          ) {
+            showToast('Enable at least one payment method for customers.', 'error');
+            return;
+          }
+
+          setSavingBankSettings(true);
+          try {
+            await updateAppSettings({
+              upiId: trimmedUpi,
+              upiPayeeName: (settingsForm.upiPayeeName || '').trim(),
+              bankAccountHolder: (settingsForm.bankAccountHolder || '').trim(),
+              bankName: (settingsForm.bankName || '').trim(),
+              bankAccountNumber: trimmedAcc,
+              bankBranch: (settingsForm.bankBranch || '').trim(),
+              bankIfscCode: trimmedIfsc,
+              acceptUpi: settingsForm.acceptUpi ?? true,
+              acceptDebitCard: settingsForm.acceptDebitCard ?? true,
+              acceptCreditCard: settingsForm.acceptCreditCard ?? true,
+              acceptBankTransfer: settingsForm.acceptBankTransfer ?? true,
+              acceptCod: settingsForm.acceptCod ?? true
+            });
+            setBankSettingsSaved(true);
+            setTimeout(() => setBankSettingsSaved(false), 3500);
+            showToast('Admin Bank Account & UPI receiving details saved!', 'success');
+          } catch {
+            showToast('Unable to save Bank & UPI details. Please retry.', 'error');
+          } finally {
+            setSavingBankSettings(false);
+          }
+        };
 
         return (
           <div className="space-y-6 animate-in fade-in">
             <div>
               <h2 className="text-2xl font-bold text-gray-800">Payment & Charges Management</h2>
-              <p className="text-sm text-gray-500">Monitor incoming digital payments, Cash on Delivery settlement, and configure delivery charges.</p>
+              <p className="text-sm text-gray-500">Configure your direct receiving Bank Account, UPI ID, accepted payment modes (UPI, Debit/Credit Card, Bank Transfer, COD), and delivery fees.</p>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
                 <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">Total Processed</span>
                 <p className="text-3xl font-extrabold text-gray-900 mt-2">{formatCurrency(totalRevenue)}</p>
-                <p className="text-xs text-gray-400 mt-2">Combined UPI + COD volume</p>
+                <p className="text-xs text-gray-400 mt-2">Combined Online + Bank + COD volume</p>
               </div>
 
               <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
-                <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">Online UPI Paid</span>
-                <p className="text-3xl font-extrabold text-green-600 mt-2">{formatCurrency(upiTotal)}</p>
-                <p className="text-xs text-green-600 mt-2">Cleared digital payments</p>
+                <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">Direct Bank / Digital Paid</span>
+                <p className="text-3xl font-extrabold text-green-600 mt-2">{formatCurrency(digitalBankTotal)}</p>
+                <p className="text-xs text-green-700 mt-2">
+                  UPI {formatCurrency(upiTotal)} • Cards {formatCurrency(cardTotal)} • Bank {formatCurrency(bankTransferTotal)}
+                </p>
               </div>
 
               <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
@@ -1165,6 +1630,171 @@ export const AdminDashboard = () => {
                 <p className="text-xs text-orange-500 mt-2">{formatCurrency(codPendingTotal)} pending collection</p>
               </div>
             </div>
+
+            {/* Admin Direct Receiving Bank Account & UPI Configuration */}
+            <form onSubmit={handleSaveBankAndUpi} className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-4">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 flex items-center justify-center shrink-0">
+                    <Landmark size={20} />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-base text-gray-900">Admin Direct Bank Account &amp; UPI Receiving Details</h3>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      Customer payments via UPI, Debit Card, Credit Card, and Direct Bank Transfer settle directly into these configured merchant credentials.
+                    </p>
+                  </div>
+                </div>
+                {merchantSettlementSummary && (
+                  <span className="text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 px-3 py-1.5 rounded-xl">
+                    Active Settlement: {merchantSettlementSummary}
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* UPI Receiving Setup */}
+                <div className="bg-gray-50/80 border border-gray-200 rounded-2xl p-4 space-y-3">
+                  <div className="flex items-center gap-2 text-sm font-bold text-gray-800">
+                    <Smartphone size={16} className="text-green-600" />
+                    Direct UPI Receiving ID
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-gray-600 mb-1">Admin UPI ID (VPA)</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. freshveggie@okaxis"
+                      value={settingsForm.upiId || ''}
+                      onChange={e => setSettingsForm({ ...settingsForm, upiId: e.target.value })}
+                      className="w-full p-2.5 bg-white border border-gray-200 rounded-xl text-sm font-mono font-semibold text-gray-900 outline-none focus:ring-2 focus:ring-green-500"
+                    />
+                    <span className="text-[11px] text-gray-400">Used for Google Pay, PhonePe, Paytm, BHIM &amp; QR deep links</span>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-gray-600 mb-1">UPI Payee / Merchant Name</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. FreshVeggie Farms Pvt Ltd"
+                      value={settingsForm.upiPayeeName || ''}
+                      onChange={e => setSettingsForm({ ...settingsForm, upiPayeeName: e.target.value })}
+                      className="w-full p-2.5 bg-white border border-gray-200 rounded-xl text-sm font-semibold text-gray-900 outline-none focus:ring-2 focus:ring-green-500"
+                    />
+                  </div>
+                </div>
+
+                {/* Bank Account Settlement Setup */}
+                <div className="bg-gray-50/80 border border-gray-200 rounded-2xl p-4 space-y-3">
+                  <div className="flex items-center gap-2 text-sm font-bold text-gray-800">
+                    <Landmark size={16} className="text-blue-600" />
+                    Admin Settlement Bank Account
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-gray-600 mb-1">Account Holder Name</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. FreshVeggie Store"
+                        value={settingsForm.bankAccountHolder || ''}
+                        onChange={e => setSettingsForm({ ...settingsForm, bankAccountHolder: e.target.value })}
+                        className="w-full p-2.5 bg-white border border-gray-200 rounded-xl text-sm font-semibold text-gray-900 outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-gray-600 mb-1">Bank Name</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. State Bank of India"
+                        value={settingsForm.bankName || ''}
+                        onChange={e => setSettingsForm({ ...settingsForm, bankName: e.target.value })}
+                        className="w-full p-2.5 bg-white border border-gray-200 rounded-xl text-sm font-semibold text-gray-900 outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-gray-600 mb-1">Bank Account Number</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. 40928173645"
+                        value={settingsForm.bankAccountNumber || ''}
+                        onChange={e => setSettingsForm({ ...settingsForm, bankAccountNumber: e.target.value })}
+                        className="w-full p-2.5 bg-white border border-gray-200 rounded-xl text-sm font-mono font-semibold text-gray-900 outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-gray-600 mb-1">IFSC Code</label>
+                      <input
+                        type="text"
+                        maxLength={11}
+                        placeholder="e.g. SBIN0001234"
+                        value={settingsForm.bankIfscCode || ''}
+                        onChange={e => setSettingsForm({ ...settingsForm, bankIfscCode: e.target.value.toUpperCase() })}
+                        className="w-full p-2.5 bg-white border border-gray-200 rounded-xl text-sm font-mono font-bold uppercase text-gray-900 outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-gray-600 mb-1">Branch Name</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. City Center Branch, Gwalior"
+                      value={settingsForm.bankBranch || ''}
+                      onChange={e => setSettingsForm({ ...settingsForm, bankBranch: e.target.value })}
+                      className="w-full p-2.5 bg-white border border-gray-200 rounded-xl text-sm font-semibold text-gray-900 outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Accepted Checkout Payment Channels */}
+              <div className="space-y-2">
+                <p className="text-xs font-bold text-gray-600 uppercase tracking-wider">Accepted Customer Checkout Methods</p>
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
+                  {[
+                    { key: 'acceptUpi' as const, label: 'UPI Direct' },
+                    { key: 'acceptDebitCard' as const, label: 'Debit Card' },
+                    { key: 'acceptCreditCard' as const, label: 'Credit Card' },
+                    { key: 'acceptBankTransfer' as const, label: 'Bank Account' },
+                    { key: 'acceptCod' as const, label: 'Cash on Delivery' }
+                  ].map(ch => {
+                    const enabled = settingsForm[ch.key] ?? true;
+                    return (
+                      <label
+                        key={ch.key}
+                        className={`flex items-center justify-between gap-2 p-3 rounded-xl border text-xs font-bold cursor-pointer transition ${
+                          enabled ? 'bg-green-50 border-green-300 text-green-900' : 'bg-gray-50 border-gray-200 text-gray-500'
+                        }`}
+                      >
+                        <span>{ch.label}</span>
+                        <input
+                          type="checkbox"
+                          checked={enabled}
+                          onChange={e => setSettingsForm({ ...settingsForm, [ch.key]: e.target.checked })}
+                          className="w-4 h-4 accent-green-600 rounded"
+                        />
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {bankSettingsSaved && (
+                <div className="p-3 bg-green-50 border border-green-200 rounded-xl text-green-700 text-xs font-bold flex items-center gap-2">
+                  <CheckCircle2 size={16} /> Admin Bank Account &amp; UPI details synced across customer checkout!
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="submit"
+                  disabled={savingBankSettings}
+                  className="bg-green-600 hover:bg-green-700 disabled:opacity-60 text-white font-bold px-5 py-2.5 rounded-xl text-sm shadow-sm transition"
+                >
+                  {savingBankSettings ? 'Saving Bank & UPI Details...' : 'Save Bank & UPI Details'}
+                </button>
+                <span className="text-xs text-gray-400">Changes update live checkout settlement details immediately.</span>
+              </div>
+            </form>
 
             {/* Delivery charge configuration card */}
             <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 space-y-4">
@@ -1214,7 +1844,7 @@ export const AdminDashboard = () => {
             {/* Transaction Ledger */}
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
               <div className="p-5 border-b border-gray-100">
-                <h3 className="font-bold text-base text-gray-800">Payment Transactions & COD Reconciliation</h3>
+                <h3 className="font-bold text-base text-gray-800">Payment Transactions &amp; Direct Settlement Reconciliation</h3>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm text-gray-600">
@@ -1222,7 +1852,7 @@ export const AdminDashboard = () => {
                     <tr>
                       <th className="p-4">Order ID</th>
                       <th className="p-4">Customer</th>
-                      <th className="p-4">Method</th>
+                      <th className="p-4">Method &amp; Reference</th>
                       <th className="p-4">Amount</th>
                       <th className="p-4">Payment Status</th>
                       <th className="p-4 text-right">Action</th>
@@ -1235,7 +1865,22 @@ export const AdminDashboard = () => {
                         <tr key={o.id} className="hover:bg-gray-50/80">
                           <td className="p-4 font-bold text-gray-900">#{o.id}</td>
                           <td className="p-4 text-gray-800">{o.customerName || 'Customer'}</td>
-                          <td className="p-4 uppercase text-xs font-bold">{o.paymentMethod}</td>
+                          <td className="p-4">
+                            <div className="text-xs font-bold text-gray-800">
+                              {o.paymentChannelLabel || formatPaymentMethodLabel(o.paymentMethod)}
+                              {o.cardLast4 ? ` (${o.cardNetwork || 'Card'} •••• ${o.cardLast4})` : ''}
+                            </div>
+                            {o.paymentReference && (
+                              <div className="text-[11px] font-mono text-blue-700 mt-0.5">
+                                Ref/UTR: {o.paymentReference}
+                              </div>
+                            )}
+                            {o.settlementTargetSummary && (
+                              <div className="text-[10px] text-gray-400 mt-0.5 truncate max-w-[260px]">
+                                To: {o.settlementTargetSummary}
+                              </div>
+                            )}
+                          </td>
                           <td className="p-4 font-bold text-gray-900">{formatCurrency(o.total)}</td>
                           <td className="p-4">
                             <span className={`px-2 py-0.5 rounded text-xs font-bold uppercase ${
@@ -1257,7 +1902,7 @@ export const AdminDashboard = () => {
                                 }}
                                 className="px-3 py-1 bg-green-600 text-white rounded-lg text-xs font-bold hover:bg-green-700"
                               >
-                                {o.paymentMethod === 'cod' ? 'Mark Cash Collected' : 'Mark Paid'}
+                                {o.paymentMethod === 'cod' ? 'Mark Cash Collected' : 'Mark Settled'}
                               </button>
                             ) : (
                               <span className="text-xs text-green-600 font-semibold">Reconciled</span>
@@ -1383,7 +2028,7 @@ export const AdminDashboard = () => {
                         o.customerPhone,
                         o.address?.city || '',
                         o.total,
-                        o.paymentMethod,
+                        formatPaymentMethodLabel(o.paymentMethod),
                         o.paymentStatus,
                         o.status,
                         o.assignedToName || 'Unassigned'
@@ -1626,6 +2271,8 @@ export const AdminDashboard = () => {
                 <label className="block text-sm font-bold text-gray-700 mb-1">Applicable GST / Tax Rate (%)</label>
                 <input
                   type="number"
+                  min={0}
+                  max={50}
                   value={settingsForm.taxRate}
                   onChange={e => setSettingsForm({ ...settingsForm, taxRate: Number(e.target.value) })}
                   className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl font-bold text-gray-800 outline-none focus:ring-2 focus:ring-blue-500"
@@ -1636,6 +2283,8 @@ export const AdminDashboard = () => {
                 <label className="block text-sm font-bold text-gray-700 mb-1">Base Delivery Fee (₹)</label>
                 <input
                   type="number"
+                  min={0}
+                  max={5000}
                   value={settingsForm.baseDeliveryFee}
                   onChange={e => setSettingsForm({ ...settingsForm, baseDeliveryFee: Number(e.target.value) })}
                   className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl font-bold text-gray-800 outline-none focus:ring-2 focus:ring-blue-500"
@@ -1646,6 +2295,8 @@ export const AdminDashboard = () => {
                 <label className="block text-sm font-bold text-gray-700 mb-1">Free Delivery Order Threshold (₹)</label>
                 <input
                   type="number"
+                  min={0}
+                  max={50000}
                   value={settingsForm.freeDeliveryThreshold}
                   onChange={e => setSettingsForm({ ...settingsForm, freeDeliveryThreshold: Number(e.target.value) })}
                   className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl font-bold text-gray-800 outline-none focus:ring-2 focus:ring-blue-500"
@@ -1784,6 +2435,15 @@ export const AdminDashboard = () => {
             )}
           </div>
         );
+
+      case 'areas':
+        return <AreaPincodeControlCenter onExportCsv={downloadCsv} />;
+
+      case 'databases':
+        return <DatabaseControlCenter />;
+
+      case 'servers':
+        return <ServerApiControlCenter />;
 
       default:
         return null;
@@ -1971,6 +2631,8 @@ export const AdminDashboard = () => {
                   <input
                     type="number"
                     required
+                    min={0}
+                    max={100000}
                     value={productForm.pricePerKg}
                     onChange={e => setProductForm({ ...productForm, pricePerKg: Number(e.target.value) })}
                     className="w-full p-2.5 border rounded-xl text-sm font-bold outline-none"
@@ -2078,13 +2740,20 @@ export const AdminDashboard = () => {
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
+                const finalArea = (useCustomDriverZone ? customDriverZone : driverForm.area)
+                  .trim()
+                  .slice(0, 80);
+                if (!finalArea) {
+                  showToast('Please select or enter an assigned area/pincode.', 'error');
+                  return;
+                }
                 try {
                   const created = await addDeliveryBoy({
                     uid: driverForm.uid,
                     email: driverForm.email,
                     name: driverForm.name,
                     phone: driverForm.phone,
-                    area: driverForm.area,
+                    area: finalArea,
                     vehicle: driverForm.vehicle,
                     isOnline: false,
                     isApproved: true
@@ -2095,9 +2764,11 @@ export const AdminDashboard = () => {
                     email: '',
                     name: '',
                     phone: '',
-                    area: 'Sector 14',
+                    area: driverZoneOptions[0] || 'Central Zone',
                     vehicle: 'Motorcycle'
                   });
+                  setUseCustomDriverZone(false);
+                  setCustomDriverZone('');
                   setShowDriverModal(false);
                 } catch (err) {
                   const msg = err instanceof Error ? err.message : 'Unable to add partner';
@@ -2157,16 +2828,23 @@ export const AdminDashboard = () => {
                 <div>
                   <label className="block text-xs font-bold text-gray-600 mb-1">Assigned Area</label>
                   <select
-                    value={driverForm.area}
-                    onChange={e => setDriverForm({ ...driverForm, area: e.target.value })}
+                    value={useCustomDriverZone ? '__custom__' : driverForm.area}
+                    onChange={e => {
+                      if (e.target.value === '__custom__') {
+                        setUseCustomDriverZone(true);
+                      } else {
+                        setUseCustomDriverZone(false);
+                        setDriverForm({ ...driverForm, area: e.target.value });
+                      }
+                    }}
                     className="w-full p-2.5 border rounded-xl text-sm outline-none"
                   >
-                    <option value="Sector 14">Sector 14</option>
-                    <option value="Cyber City">Cyber City</option>
-                    <option value="Green Park">Green Park</option>
-                    <option value="Dwarka">Dwarka</option>
-                    <option value="Rohini">Rohini</option>
-                    <option value="Central Zone">Central Zone</option>
+                    {driverZoneOptions.map((zone) => (
+                      <option key={zone} value={zone}>
+                        {zone}
+                      </option>
+                    ))}
+                    <option value="__custom__">+ Custom Area / Pincode</option>
                   </select>
                 </div>
 
@@ -2184,6 +2862,21 @@ export const AdminDashboard = () => {
                   </select>
                 </div>
               </div>
+
+              {useCustomDriverZone && (
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 mb-1">Custom Area / Pincode *</label>
+                  <input
+                    type="text"
+                    required
+                    maxLength={80}
+                    placeholder="e.g. Gwalior (474011)"
+                    value={customDriverZone}
+                    onChange={e => setCustomDriverZone(e.target.value)}
+                    className="w-full p-2.5 border border-blue-300 rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+              )}
 
               <div className="pt-3 flex gap-2">
                 <button
@@ -2226,13 +2919,22 @@ export const AdminDashboard = () => {
                   showToast('Promo code must be at least 2 alphanumeric characters.', 'error');
                   return;
                 }
+                const numericDiscount = Number(couponForm.discountValue);
+                if (!Number.isFinite(numericDiscount) || numericDiscount <= 0) {
+                  showToast('Discount value must be greater than zero.', 'error');
+                  return;
+                }
+                if (couponForm.discountType === 'percent' && numericDiscount > 100) {
+                  showToast('Percentage discount cannot exceed 100%.', 'error');
+                  return;
+                }
                 try {
                   await addCoupon({
                     code: cleanCode,
                     description: couponForm.description,
                     discountType: couponForm.discountType,
-                    discountValue: Number(couponForm.discountValue),
-                    minOrder: Number(couponForm.minOrder),
+                    discountValue: numericDiscount,
+                    minOrder: Math.max(0, Number(couponForm.minOrder) || 0),
                     isActive: true,
                     expiry: couponForm.expiry
                   });
@@ -2286,6 +2988,8 @@ export const AdminDashboard = () => {
                   <input
                     type="number"
                     required
+                    min={1}
+                    max={couponForm.discountType === 'percent' ? 100 : 10000}
                     value={couponForm.discountValue}
                     onChange={e => setCouponForm({ ...couponForm, discountValue: Number(e.target.value) })}
                     className="w-full p-2.5 border rounded-xl text-sm font-bold outline-none"
@@ -2299,6 +3003,8 @@ export const AdminDashboard = () => {
                   <input
                     type="number"
                     required
+                    min={0}
+                    max={100000}
                     value={couponForm.minOrder}
                     onChange={e => setCouponForm({ ...couponForm, minOrder: Number(e.target.value) })}
                     className="w-full p-2.5 border rounded-xl text-sm outline-none"
@@ -2404,40 +3110,141 @@ export const AdminDashboard = () => {
       {viewingOrder && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl w-full max-w-lg overflow-hidden shadow-2xl p-6 space-y-4 max-h-[85vh] overflow-y-auto">
-            <div className="flex justify-between items-center border-b pb-3">
+            <div className="flex justify-between items-start border-b pb-3 gap-3">
               <div>
                 <h3 className="font-bold text-lg text-gray-800">Order #{viewingOrder.id}</h3>
-                <p className="text-xs text-gray-500">{viewingOrder.deliverySlot}</p>
+                <p className="text-xs text-gray-500">
+                  Order Date: {formatOrderDateTime(viewingOrder.date)}
+                </p>
+                <p className="text-xs font-semibold text-blue-700 mt-0.5">
+                  Slot: {viewingOrder.deliverySlot}
+                </p>
               </div>
-              <button onClick={() => setViewingOrderId(null)} className="text-gray-400 hover:text-gray-600">
-                <X size={20} />
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = viewingOrder;
+                    setViewingOrderId(null);
+                    openEditOrderModal(target);
+                  }}
+                  className="inline-flex items-center gap-1 text-xs font-bold bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 px-2.5 py-1.5 rounded-lg transition"
+                >
+                  <Edit2 size={12} /> Edit Details
+                </button>
+                <button onClick={() => setViewingOrderId(null)} className="text-gray-400 hover:text-gray-600">
+                  <X size={20} />
+                </button>
+              </div>
             </div>
             <div className="bg-gray-50 p-3 rounded-xl text-xs space-y-1">
-              <p><strong>Customer:</strong> {viewingOrder.customerName} ({viewingOrder.customerPhone})</p>
-              <p><strong>Address:</strong> {viewingOrder.address?.street}, {viewingOrder.address?.city} - {viewingOrder.address?.zip}</p>
-              <p><strong>Payment:</strong> {viewingOrder.paymentMethod.toUpperCase()} ({viewingOrder.paymentStatus || 'pending'})</p>
+              <p><strong>Customer:</strong> {viewingOrder.customerName} (+{viewingOrder.customerPhone})</p>
+              <p><strong>Address ({viewingOrder.address?.label || 'Home'}):</strong> {viewingOrder.address?.street}, {viewingOrder.address?.city} - {viewingOrder.address?.zip}</p>
+              <p>
+                <strong>Payment:</strong>{' '}
+                {viewingOrder.paymentChannelLabel || formatPaymentMethodLabel(viewingOrder.paymentMethod)}
+                {viewingOrder.cardLast4 ? ` (${viewingOrder.cardNetwork || 'Card'} •••• ${viewingOrder.cardLast4})` : ''}{' '}
+                <span className="uppercase font-semibold">({viewingOrder.paymentStatus || 'pending'})</span>
+              </p>
+              {viewingOrder.paymentReference && (
+                <p><strong>UTR / Auth Ref:</strong> <span className="font-mono text-blue-700">{viewingOrder.paymentReference}</span></p>
+              )}
+              {viewingOrder.settlementTargetSummary && (
+                <p><strong>Settled To:</strong> <span className="text-emerald-700 font-medium">{viewingOrder.settlementTargetSummary}</span></p>
+              )}
               <p><strong>Driver:</strong> {viewingOrder.assignedToName || 'Unassigned'}</p>
             </div>
             <div className="space-y-2">
-              <h4 className="font-bold text-xs uppercase text-gray-500">Ordered Items</h4>
+              <h4 className="font-bold text-xs uppercase text-gray-500">
+                Ordered Items ({viewingOrder.items?.length || 0})
+              </h4>
               {viewingOrder.items?.map((item, idx) => (
                 <div key={idx} className="flex justify-between items-center text-sm bg-gray-50 p-2.5 rounded-lg">
                   <div className="flex items-center gap-2.5">
                     <img src={item.image} alt={item.name} className="w-9 h-9 rounded object-cover" />
                     <div>
                       <p className="font-semibold text-gray-800">{item.name}</p>
-                      <p className="text-xs text-gray-500">{item.selectedWeight}g × {item.quantity}</p>
+                      <p className="text-xs text-gray-500">
+                        {item.selectedWeight}g × {item.quantity} ({formatCurrency(item.pricePerKg)}/kg)
+                      </p>
                     </div>
                   </div>
-                  <span className="font-bold text-gray-900">{formatCurrency((item.pricePerKg / 1000) * item.selectedWeight * item.quantity)}</span>
+                  <span className="font-bold text-gray-900">
+                    {formatCurrency((item.pricePerKg / 1000) * item.selectedWeight * item.quantity)}
+                  </span>
                 </div>
               ))}
             </div>
-            <div className="border-t pt-3 flex justify-between items-center font-bold text-base">
-              <span>Order Total</span>
-              <span className="text-green-700">{formatCurrency(viewingOrder.total)}</span>
-            </div>
+
+            {(() => {
+              const billing = getOrderBillingBreakdown(viewingOrder, appSettings);
+              return (
+                <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-2 text-xs">
+                  <div className="flex items-center justify-between border-b border-gray-200 pb-2">
+                    <h4 className="font-bold uppercase tracking-wider text-gray-600">
+                      Bill &amp; Price Breakdown
+                    </h4>
+                    {billing.isEstimated && (
+                      <span className="text-[10px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
+                        Legacy Order (Auto-Reconciled)
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex justify-between items-center text-gray-700">
+                    <span>Order Total (Items Subtotal)</span>
+                    <span className="font-semibold text-gray-900">{formatCurrency(billing.subtotal)}</span>
+                  </div>
+
+                  <div className="flex justify-between items-center text-gray-700">
+                    <span>
+                      + GST / Taxes{billing.taxRate > 0 ? ` (${billing.taxRate}%)` : ''}
+                    </span>
+                    <span className="font-semibold text-gray-900">+ {formatCurrency(billing.taxAmount)}</span>
+                  </div>
+
+                  <div className="flex justify-between items-center text-gray-700">
+                    <span>+ Delivery Fees</span>
+                    {billing.deliveryFee === 0 ? (
+                      <span className="font-bold text-green-600">Free (₹0)</span>
+                    ) : (
+                      <span className="font-semibold text-gray-900">+ {formatCurrency(billing.deliveryFee)}</span>
+                    )}
+                  </div>
+
+                  <div className="flex justify-between items-center text-gray-700">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span>- Discount Coupon</span>
+                      {billing.couponCode ? (
+                        <span className="inline-flex items-center gap-1 bg-green-100 text-green-800 border border-green-300 font-mono font-bold text-[10px] px-2 py-0.5 rounded">
+                          <Tag size={10} /> {billing.couponCode}
+                        </span>
+                      ) : billing.discountAmount > 0 ? (
+                        <span className="inline-flex items-center gap-1 bg-green-100 text-green-800 font-bold text-[10px] px-2 py-0.5 rounded">
+                          APPLIED
+                        </span>
+                      ) : (
+                        <span className="text-[11px] text-gray-400">(No coupon applied)</span>
+                      )}
+                    </div>
+                    <span
+                      className={`font-bold ${
+                        billing.discountAmount > 0 ? 'text-green-600' : 'text-gray-400'
+                      }`}
+                    >
+                      {billing.discountAmount > 0
+                        ? `- ${formatCurrency(billing.discountAmount)}`
+                        : formatCurrency(0)}
+                    </span>
+                  </div>
+
+                  <div className="border-t border-gray-300 pt-2.5 mt-1 flex justify-between items-center text-base font-extrabold">
+                    <span className="text-gray-900">Grand Total</span>
+                    <span className="text-green-700">= {formatCurrency(billing.grandTotal)}</span>
+                  </div>
+                </div>
+              );
+            })()}
             {viewingOrder.proofImageUrl && (
               <div className="bg-green-50 border border-green-200 rounded-xl p-3 space-y-2">
                 <p className="text-xs font-bold text-green-800 flex items-center gap-1.5">
@@ -2450,6 +3257,302 @@ export const AdminDashboard = () => {
                 />
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ----------------------------------------------------------------- */}
+      {/* Edit Order Details Modal (Date, Slot, Address, Pincode & Phone) */}
+      {/* ----------------------------------------------------------------- */}
+      {editingOrder && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-lg overflow-hidden shadow-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center border-b pb-3">
+              <div>
+                <h3 className="font-bold text-lg text-gray-800">Edit Order #{editingOrder.id}</h3>
+                <p className="text-xs text-gray-500">
+                  Update order date, delivery slot time, customer phone, address, and pincode.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingOrder(null)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                const cleanDigits = editOrderForm.customerPhone.replace(/\D/g, '');
+                if (cleanDigits.length < 10 || cleanDigits.length > 15) {
+                  showToast('Customer phone number must contain 10 to 15 digits.', 'error');
+                  return;
+                }
+                if (!editOrderForm.street.trim() || !editOrderForm.city.trim()) {
+                  showToast('Street address and city are required.', 'error');
+                  return;
+                }
+                if (editOrderForm.zip.trim().length < 3) {
+                  showToast('Please enter a valid pincode (minimum 3 characters).', 'error');
+                  return;
+                }
+
+                const safeTime = (editOrderForm.orderTime || '12:00').trim().slice(0, 5);
+                const combinedIso = editOrderForm.orderDate
+                  ? new Date(`${editOrderForm.orderDate}T${safeTime}:00`)
+                  : new Date(editingOrder.date);
+                if (Number.isNaN(combinedIso.getTime())) {
+                  showToast('Please select a valid order date.', 'error');
+                  return;
+                }
+
+                let finalSlot = '';
+                if (editOrderForm.slotWindow === '__custom__') {
+                  finalSlot = editOrderForm.customSlotText.trim();
+                } else {
+                  const slotDayObj = editOrderForm.slotDate
+                    ? new Date(`${editOrderForm.slotDate}T12:00:00`)
+                    : combinedIso;
+                  const datePrefix = !Number.isNaN(slotDayObj.getTime())
+                    ? format(slotDayObj, 'EEE, MMM d')
+                    : '';
+                  finalSlot = datePrefix
+                    ? `${datePrefix} - ${editOrderForm.slotWindow}`
+                    : editOrderForm.slotWindow;
+                }
+
+                if (!finalSlot) {
+                  showToast('Delivery slot time cannot be empty.', 'error');
+                  return;
+                }
+
+                setSavingOrderEdit(true);
+                try {
+                  await updateOrderDetails(editingOrder.id, {
+                    date: combinedIso.toISOString(),
+                    deliverySlot: finalSlot,
+                    customerName: editOrderForm.customerName.trim() || editingOrder.customerName,
+                    customerPhone: cleanDigits,
+                    address: {
+                      label: editOrderForm.addressLabel.trim() || 'Home',
+                      street: editOrderForm.street.trim(),
+                      city: editOrderForm.city.trim(),
+                      zip: editOrderForm.zip.trim()
+                    }
+                  });
+                  showToast(`Order #${editingOrder.id} updated cleanly!`, 'success');
+                  setEditingOrder(null);
+                } catch (err) {
+                  const msg = err instanceof Error ? err.message : 'Unable to update order details.';
+                  showToast(msg, 'error');
+                } finally {
+                  setSavingOrderEdit(false);
+                }
+              }}
+              className="space-y-4"
+            >
+              {/* Order Date & Time */}
+              <div className="bg-gray-50 p-3.5 rounded-xl border border-gray-200 space-y-2.5">
+                <p className="text-xs font-bold text-gray-700 uppercase flex items-center gap-1.5">
+                  <Calendar size={14} className="text-blue-600" /> Order Date &amp; Time
+                </p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold text-gray-600 mb-1">Order Date *</label>
+                    <input
+                      type="date"
+                      required
+                      value={editOrderForm.orderDate}
+                      onChange={e => setEditOrderForm({ ...editOrderForm, orderDate: e.target.value })}
+                      className="w-full p-2 bg-white border border-gray-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-gray-600 mb-1">Order Time</label>
+                    <input
+                      type="time"
+                      value={editOrderForm.orderTime}
+                      onChange={e => setEditOrderForm({ ...editOrderForm, orderTime: e.target.value })}
+                      className="w-full p-2 bg-white border border-gray-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Delivery Slot Date & Window */}
+              <div className="bg-blue-50/60 p-3.5 rounded-xl border border-blue-200 space-y-2.5">
+                <p className="text-xs font-bold text-blue-900 uppercase flex items-center gap-1.5">
+                  <Clock size={14} className="text-blue-600" /> Delivery Slot Schedule
+                </p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold text-gray-600 mb-1">Slot Date</label>
+                    <input
+                      type="date"
+                      disabled={editOrderForm.slotWindow === '__custom__'}
+                      value={editOrderForm.slotDate}
+                      onChange={e => setEditOrderForm({ ...editOrderForm, slotDate: e.target.value })}
+                      className="w-full p-2 bg-white border border-blue-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-gray-600 mb-1">Slot Time Window</label>
+                    <select
+                      value={editOrderForm.slotWindow}
+                      onChange={e => setEditOrderForm({ ...editOrderForm, slotWindow: e.target.value })}
+                      className="w-full p-2 bg-white border border-blue-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      {SLOT_TIME_WINDOWS.map((win) => (
+                        <option key={win} value={win}>
+                          {win}
+                        </option>
+                      ))}
+                      <option value="__custom__">+ Custom Slot Text</option>
+                    </select>
+                  </div>
+                </div>
+
+                {editOrderForm.slotWindow === '__custom__' ? (
+                  <div>
+                    <label className="block text-[11px] font-bold text-gray-600 mb-1">Custom Delivery Slot *</label>
+                    <input
+                      type="text"
+                      required
+                      maxLength={120}
+                      placeholder="e.g. Sat, Nov 21 - Express 2:00 PM - 3:00 PM"
+                      value={editOrderForm.customSlotText}
+                      onChange={e => setEditOrderForm({ ...editOrderForm, customSlotText: e.target.value })}
+                      className="w-full p-2 bg-white border border-blue-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-blue-800">
+                    Saved Slot:{' '}
+                    <strong>
+                      {editOrderForm.slotDate && !Number.isNaN(new Date(`${editOrderForm.slotDate}T12:00:00`).getTime())
+                        ? `${format(new Date(`${editOrderForm.slotDate}T12:00:00`), 'EEE, MMM d')} - ${editOrderForm.slotWindow}`
+                        : editOrderForm.slotWindow}
+                    </strong>
+                  </p>
+                )}
+              </div>
+
+              {/* Customer Contact */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 mb-1">Customer Name *</label>
+                  <input
+                    type="text"
+                    required
+                    maxLength={120}
+                    value={editOrderForm.customerName}
+                    onChange={e => setEditOrderForm({ ...editOrderForm, customerName: e.target.value })}
+                    className="w-full p-2.5 border border-gray-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 mb-1">Phone Number *</label>
+                  <input
+                    type="tel"
+                    required
+                    maxLength={15}
+                    placeholder="10-15 digits"
+                    value={editOrderForm.customerPhone}
+                    onChange={e => setEditOrderForm({ ...editOrderForm, customerPhone: e.target.value })}
+                    className="w-full p-2.5 border border-gray-200 rounded-xl text-sm font-mono outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+
+              {/* Address & Pincode */}
+              <div className="space-y-3 border-t pt-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-bold text-gray-700 uppercase flex items-center gap-1.5">
+                    <MapPin size={14} className="text-green-600" /> Delivery Address &amp; Pincode
+                  </p>
+                  <select
+                    value={editOrderForm.addressLabel}
+                    onChange={e => setEditOrderForm({ ...editOrderForm, addressLabel: e.target.value })}
+                    className="px-2 py-1 border border-gray-200 rounded-lg text-xs font-semibold text-gray-700 outline-none"
+                  >
+                    <option value="Home">Home</option>
+                    <option value="Office">Office</option>
+                    <option value="Other">Other</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 mb-1">Street / House / Landmark *</label>
+                  <input
+                    type="text"
+                    required
+                    maxLength={300}
+                    value={editOrderForm.street}
+                    onChange={e => setEditOrderForm({ ...editOrderForm, street: e.target.value })}
+                    className="w-full p-2.5 border border-gray-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-bold text-gray-600 mb-1">City *</label>
+                    <input
+                      type="text"
+                      required
+                      maxLength={100}
+                      value={editOrderForm.city}
+                      onChange={e => setEditOrderForm({ ...editOrderForm, city: e.target.value })}
+                      className="w-full p-2.5 border border-gray-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-gray-600 mb-1">Pincode *</label>
+                    <input
+                      type="text"
+                      required
+                      maxLength={20}
+                      value={editOrderForm.zip}
+                      onChange={e => setEditOrderForm({ ...editOrderForm, zip: e.target.value })}
+                      className="w-full p-2.5 border border-gray-200 rounded-xl text-sm font-mono outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+
+                {editOrderForm.zip.trim().length >= 4 && (() => {
+                  const zoneCheck = checkPincodeServiceability(editOrderForm.zip.trim());
+                  return zoneCheck.matchedArea ? (
+                    <p className="text-[11px] font-medium text-green-700 bg-green-50 border border-green-200 px-2.5 py-1.5 rounded-lg">
+                      ✓ Matches configured area: <strong>{zoneCheck.matchedArea.name} ({zoneCheck.matchedArea.pincode})</strong>
+                    </p>
+                  ) : (
+                    <p className="text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-lg">
+                      Note: Pincode {editOrderForm.zip.trim()} is not yet added to configured Service Areas (order will auto-appear in Area &amp; Fleet assignment lists).
+                    </p>
+                  );
+                })()}
+              </div>
+
+              <div className="pt-2 flex gap-2">
+                <button
+                  type="button"
+                  disabled={savingOrderEdit}
+                  onClick={() => setEditingOrder(null)}
+                  className="flex-1 py-2.5 border border-gray-200 rounded-xl text-sm font-bold text-gray-600 hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingOrderEdit}
+                  className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white rounded-xl text-sm font-bold"
+                >
+                  {savingOrderEdit ? 'Saving Changes...' : 'Save Order Details'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

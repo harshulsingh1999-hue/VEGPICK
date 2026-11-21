@@ -28,6 +28,8 @@ export const ProductCard = ({ product }: { product: Product }) => {
         <img 
           src={product.image} 
           alt={product.name}
+          referrerPolicy="no-referrer"
+          loading="lazy"
           className="w-full h-full object-contain mix-blend-multiply"
         />
         {!product.available && (

@@ -1,7 +1,16 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Link } from 'react-router-dom';
-import { Search, ArrowRight, Menu, Shield, Sprout } from 'lucide-react';
-import { CATEGORIES } from '../lib/data';
+import {
+  Search,
+  ArrowRight,
+  Menu,
+  Shield,
+  Sprout,
+  MapPin,
+  CheckCircle2,
+  AlertTriangle
+} from 'lucide-react';
+import { CATEGORIES, Product } from '../lib/data';
 import { useStore } from '../context/StoreContext';
 import { ProductCard } from '../components/ProductCard';
 import { Sidebar } from '../components/Sidebar';
@@ -31,12 +40,111 @@ const BANNER_PALETTES = [
   }
 ];
 
+const getCategoryVisual = (cat: string): { emoji: string; surface: string; tagline: string } => {
+  switch (cat) {
+    case 'Leafy Greens':
+      return { emoji: '🥬', surface: 'bg-emerald-50 text-emerald-700', tagline: 'Spinach, kale & crisp greens' };
+    case 'Root Vegetables':
+      return { emoji: '🥕', surface: 'bg-orange-50 text-orange-700', tagline: 'Potatoes, onions, carrots' };
+    case 'Fruits':
+      return { emoji: '🍎', surface: 'bg-rose-50 text-rose-700', tagline: 'Vine tomatoes & orchard picks' };
+    case 'Herbs':
+      return { emoji: '🌿', surface: 'bg-green-50 text-green-700', tagline: 'Coriander, mint & aromatics' };
+    case 'Exotic':
+      return { emoji: '🥦', surface: 'bg-teal-50 text-teal-700', tagline: 'Broccoli, peppers & specialty' };
+    default:
+      return { emoji: '🧺', surface: 'bg-lime-50 text-lime-700', tagline: 'Farm fresh seasonal produce' };
+  }
+};
+
+const toTimestampMs = (raw: unknown): number => {
+  if (!raw) return 0;
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (typeof raw === 'string') {
+    const parsed = Date.parse(raw);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+  if (typeof raw === 'object' && raw !== null) {
+    if ('toMillis' in raw && typeof (raw as { toMillis: () => number }).toMillis === 'function') {
+      return (raw as { toMillis: () => number }).toMillis();
+    }
+    if ('seconds' in raw && typeof (raw as { seconds: number }).seconds === 'number') {
+      return (raw as { seconds: number }).seconds * 1000;
+    }
+  }
+  return 0;
+};
+
 export const Home = () => {
-  const { setSelectedCategory, products, productsLoading, coupons } = useStore();
+  const {
+    setSelectedCategory,
+    products,
+    productsLoading,
+    coupons,
+    appSettings,
+    serviceAreas,
+    selectedPincode,
+    setSelectedPincode,
+    checkPincodeServiceability
+  } = useStore();
   const { showToast } = useToast();
-  const featuredProducts = products.slice(0, 4);
   const [currentBanner, setCurrentBanner] = useState(0);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [pinDraft, setPinDraft] = useState(selectedPincode);
+  const [editingPin, setEditingPin] = useState(false);
+  const [activeHomeCategory, setActiveHomeCategory] = useState<string>('All');
+
+  const areaStatus = checkPincodeServiceability(selectedPincode);
+
+  // Fresh Arrivals: newest catalog additions first, prioritizing in-stock produce
+  const freshArrivals = useMemo(() => {
+    const sorted = [...products].sort((a, b) => {
+      if (a.available !== b.available) return a.available ? -1 : 1;
+      const aTime = Math.max(toTimestampMs(a.createdAt), toTimestampMs(a.updatedAt));
+      const bTime = Math.max(toTimestampMs(b.createdAt), toTimestampMs(b.updatedAt));
+      if (bTime !== aTime) return bTime - aTime;
+      return (b.rating || 0) - (a.rating || 0);
+    });
+    return sorted.slice(0, 8);
+  }, [products]);
+
+  // All store categories: built-in categories + any custom categories published in Firestore
+  const allCategories = useMemo(() => {
+    const base = CATEGORIES.filter((c) => c !== 'All') as string[];
+    const seen = new Set(base.map((c) => c.toLowerCase()));
+    const merged = [...base];
+    products.forEach((p) => {
+      const cat = (p.category || '').trim();
+      if (cat && cat.toLowerCase() !== 'all' && !seen.has(cat.toLowerCase())) {
+        seen.add(cat.toLowerCase());
+        merged.push(cat);
+      }
+    });
+    return merged;
+  }, [products]);
+
+  const productsByCategory = useMemo(() => {
+    const grouped: Record<string, Product[]> = {};
+    allCategories.forEach((cat) => {
+      grouped[cat] = [];
+    });
+    products.forEach((p) => {
+      const key =
+        allCategories.find((c) => c.toLowerCase() === (p.category || '').trim().toLowerCase()) ||
+        (p.category || '').trim();
+      if (!key) return;
+      if (!grouped[key]) grouped[key] = [];
+      grouped[key].push(p);
+    });
+    return grouped;
+  }, [allCategories, products]);
+
+  const visibleCategorySections = useMemo(() => {
+    if (activeHomeCategory !== 'All') {
+      return allCategories.filter((c) => c === activeHomeCategory);
+    }
+    return allCategories;
+  }, [allCategories, activeHomeCategory]);
 
   const liveBanners = useMemo(() => {
     const active = coupons.filter((c) => c.isActive);
@@ -67,7 +175,7 @@ export const Home = () => {
   }, [liveBanners.length]);
 
   return (
-    <div className="pb-24">
+    <div className="pb-24 max-w-6xl mx-auto">
       <Sidebar isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)} />
 
       {/* Hero Section */}
@@ -79,11 +187,12 @@ export const Home = () => {
           <div className="flex items-center justify-between mb-4">
             <button
               onClick={() => setIsSidebarOpen(true)}
+              aria-label="Open menu"
               className="p-2 bg-white/20 rounded-full hover:bg-white/30 transition-colors"
             >
               <Menu size={24} className="text-white" />
             </button>
-            <h1 className="text-xl font-bold">FreshVeggie</h1>
+            <span className="text-xl font-bold tracking-tight whitespace-nowrap">FreshVeggie</span>
             <div className="w-10"></div>
           </div>
 
@@ -94,59 +203,131 @@ export const Home = () => {
 
           <Link
             to="/browse"
-            className="bg-white text-green-700 w-full py-3 rounded-xl flex items-center px-4 gap-3 shadow-sm"
+            onClick={() => setSelectedCategory('All')}
+            className="bg-white text-green-700 w-full py-3 rounded-xl flex items-center px-4 gap-3 shadow-sm hover:bg-green-50/40 transition-colors"
           >
-            <Search size={20} className="text-gray-400" />
-            <span className="text-gray-400">Search for vegetables...</span>
+            <Search size={20} className="text-gray-400 shrink-0" />
+            <span className="text-gray-500 text-sm">Search for vegetables...</span>
           </Link>
         </div>
       </div>
 
-      {/* Categories */}
-      <div className="px-4 mt-8">
-        <div className="flex justify-between items-center mb-4">
-          <h2 className="font-bold text-lg text-gray-800">Categories</h2>
-          <Link
-            to="/browse"
-            className="text-green-600 text-sm font-medium flex items-center gap-1"
+      {/* Local Area & Pincode Checker */}
+      {(appSettings.restrictToServiceAreas || serviceAreas.length > 0 || selectedPincode) && (
+        <div className="px-4 mt-4">
+          <div
+            className={`rounded-2xl border p-3.5 shadow-xs transition ${
+              selectedPincode && !areaStatus.serviceable
+                ? 'bg-red-50 border-red-200'
+                : 'bg-white border-gray-100'
+            }`}
           >
-            See All <ArrowRight size={14} />
-          </Link>
-        </div>
-
-        <div className="grid grid-cols-4 gap-4">
-          {CATEGORIES.slice(1, 5).map((cat, i) => (
-            <Link
-              to="/browse"
-              key={cat}
-              onClick={() => setSelectedCategory(cat)}
-              className="flex flex-col items-center gap-2"
-            >
-              <div
-                className={`w-16 h-16 rounded-2xl flex items-center justify-center text-2xl shadow-sm ${
-                  i % 2 === 0
-                    ? 'bg-green-50 text-green-600'
-                    : 'bg-orange-50 text-orange-600'
-                }`}
+            {editingPin || (!selectedPincode && appSettings.restrictToServiceAreas) ? (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const clean = pinDraft.replace(/\D/g, '').trim();
+                  if (clean.length < 4) {
+                    showToast('Enter a valid delivery pincode (4-10 digits)', 'error');
+                    return;
+                  }
+                  setSelectedPincode(clean);
+                  setEditingPin(false);
+                  const check = checkPincodeServiceability(clean);
+                  if (check.serviceable) {
+                    showToast(
+                      check.matchedArea
+                        ? `Delivering to ${check.matchedArea.name} (${clean})`
+                        : `Pincode ${clean} saved`,
+                      'success'
+                    );
+                  } else {
+                    showToast(check.reason || 'Area currently outside delivery range', 'error');
+                  }
+                }}
+                className="flex items-center gap-2"
               >
-                {cat === 'Fruits'
-                  ? '🍎'
-                  : cat === 'Leafy Greens'
-                  ? '🥬'
-                  : cat === 'Root Vegetables'
-                  ? '🥕'
-                  : '🥦'}
+                <MapPin size={18} className="text-green-600 shrink-0" />
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={10}
+                  placeholder="Enter delivery pincode (e.g. 122001)"
+                  value={pinDraft}
+                  onChange={(e) => setPinDraft(e.target.value.replace(/\D/g, ''))}
+                  className="flex-1 text-sm bg-gray-50 border border-gray-200 rounded-lg px-3 py-1.5 outline-none focus:ring-2 focus:ring-green-500"
+                />
+                <button
+                  type="submit"
+                  className="bg-green-600 hover:bg-green-700 text-white text-xs font-bold px-3.5 py-2 rounded-lg shrink-0"
+                >
+                  Check
+                </button>
+                {editingPin && (
+                  <button
+                    type="button"
+                    onClick={() => setEditingPin(false)}
+                    className="text-xs text-gray-500 px-2 py-1"
+                  >
+                    Cancel
+                  </button>
+                )}
+              </form>
+            ) : (
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  {selectedPincode && !areaStatus.serviceable ? (
+                    <AlertTriangle size={18} className="text-red-600 shrink-0" />
+                  ) : (
+                    <CheckCircle2 size={18} className="text-green-600 shrink-0" />
+                  )}
+                  <div className="min-w-0">
+                    {selectedPincode ? (
+                      areaStatus.serviceable ? (
+                        <p className="text-xs font-semibold text-gray-800 truncate">
+                          Delivering to{' '}
+                          <span className="text-green-700 font-bold">
+                            {areaStatus.matchedArea
+                              ? `${areaStatus.matchedArea.name}, ${areaStatus.matchedArea.city} (${selectedPincode})`
+                              : `Pincode ${selectedPincode}`}
+                          </span>
+                          {areaStatus.matchedArea && (
+                            <span className="text-gray-500 font-normal">
+                              {' '}
+                              · ~{areaStatus.matchedArea.etaMinutes} mins
+                            </span>
+                          )}
+                        </p>
+                      ) : (
+                        <p className="text-xs font-semibold text-red-700">
+                          {areaStatus.reason || `Pincode ${selectedPincode} is not serviceable yet.`}
+                        </p>
+                      )
+                    ) : (
+                      <p className="text-xs text-gray-600 truncate">
+                        Check local pincode availability &amp; estimated delivery time
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPinDraft(selectedPincode);
+                    setEditingPin(true);
+                  }}
+                  className="text-xs font-bold text-green-700 hover:underline shrink-0"
+                >
+                  {selectedPincode ? 'Change' : 'Set Pincode'}
+                </button>
               </div>
-              <span className="text-xs font-medium text-gray-600 text-center leading-tight">
-                {cat}
-              </span>
-            </Link>
-          ))}
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Live Offers Slider (backed by Firestore coupons) */}
-      <div className="px-4 mt-8">
+      <div className="px-4 mt-6">
         {liveBanners.length > 0 ? (
           <div className="relative overflow-hidden rounded-2xl h-40">
             <div
@@ -192,6 +373,7 @@ export const Home = () => {
                   <img
                     src={banner.image}
                     alt="Fresh produce offer"
+                    referrerPolicy="no-referrer"
                     className="w-32 h-32 object-contain -mr-6 drop-shadow-lg"
                   />
                 </div>
@@ -226,6 +408,7 @@ export const Home = () => {
             </div>
             <Link
               to="/browse"
+              onClick={() => setSelectedCategory('All')}
               className="bg-green-600 text-white text-xs font-bold px-4 py-2.5 rounded-xl shrink-0 hover:bg-green-700 transition"
             >
               Browse
@@ -234,16 +417,32 @@ export const Home = () => {
         )}
       </div>
 
-      {/* Featured Products */}
-      <div className="px-4 mt-8">
-        <h2 className="font-bold text-lg text-gray-800 mb-4">Fresh Arrivals</h2>
+      {/* Fresh Arrivals Section */}
+      <section aria-labelledby="fresh-arrivals-heading" className="px-4 mt-8">
+        <div className="flex items-end justify-between gap-4 mb-4">
+          <div>
+            <h2 id="fresh-arrivals-heading" className="font-bold text-lg sm:text-xl text-gray-900">
+              Fresh Arrivals
+            </h2>
+            <p className="text-xs text-gray-500 mt-0.5 tabular-nums">
+              Newest farm harvest picks · {freshArrivals.length} featured
+            </p>
+          </div>
+          <Link
+            to="/browse"
+            onClick={() => setSelectedCategory('All')}
+            className="text-green-700 hover:text-green-800 text-xs sm:text-sm font-semibold flex items-center gap-1 whitespace-nowrap shrink-0"
+          >
+            See All <ArrowRight size={14} />
+          </Link>
+        </div>
 
         {productsLoading ? (
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
             {[1, 2, 3, 4].map((skeleton) => (
               <div
                 key={skeleton}
-                className="bg-white rounded-2xl p-3 border border-gray-100 h-52 animate-pulse"
+                className="bg-white rounded-2xl p-3 border border-gray-100 h-56 animate-pulse"
               >
                 <div className="bg-gray-100 h-28 rounded-xl mb-3"></div>
                 <div className="bg-gray-100 h-4 w-2/3 rounded mb-2"></div>
@@ -251,9 +450,9 @@ export const Home = () => {
               </div>
             ))}
           </div>
-        ) : featuredProducts.length > 0 ? (
-          <div className="grid grid-cols-2 gap-3">
-            {featuredProducts.map((product) => (
+        ) : freshArrivals.length > 0 ? (
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
+            {freshArrivals.map((product) => (
               <div key={product.id}>
                 <ProductCard product={product} />
               </div>
@@ -282,7 +481,136 @@ export const Home = () => {
             </Link>
           </div>
         )}
-      </div>
+      </section>
+
+      {/* All Categories Section (directly below Fresh Arrivals) */}
+      <section aria-labelledby="all-categories-heading" className="px-4 mt-10 pt-6 border-t border-gray-100 space-y-8">
+        <div>
+          <div className="flex items-end justify-between gap-4 mb-4">
+            <div>
+              <h2 id="all-categories-heading" className="font-bold text-lg sm:text-xl text-gray-900">
+                All Categories
+              </h2>
+              <p className="text-xs text-gray-500 mt-0.5 tabular-nums">
+                {allCategories.length} produce categories · {products.length} total items
+              </p>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              {activeHomeCategory !== 'All' && (
+                <button
+                  type="button"
+                  onClick={() => setActiveHomeCategory('All')}
+                  className="text-xs font-semibold text-gray-600 hover:text-gray-900 underline whitespace-nowrap"
+                >
+                  Show All
+                </button>
+              )}
+              <Link
+                to="/browse"
+                onClick={() => setSelectedCategory('All')}
+                className="text-green-700 hover:text-green-800 text-xs sm:text-sm font-semibold flex items-center gap-1 whitespace-nowrap"
+              >
+                Full Catalog <ArrowRight size={14} />
+              </Link>
+            </div>
+          </div>
+
+          {/* Interactive All Categories Cards Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+            {allCategories.map((cat) => {
+              const visual = getCategoryVisual(cat);
+              const count = productsByCategory[cat]?.length || 0;
+              const isSelected = activeHomeCategory === cat;
+              return (
+                <button
+                  key={cat}
+                  type="button"
+                  onClick={() =>
+                    setActiveHomeCategory((prev) => (prev === cat ? 'All' : cat))
+                  }
+                  className={`text-left p-3.5 rounded-2xl border transition-all flex items-center gap-3 ${
+                    isSelected
+                      ? 'bg-green-50 border-green-500 shadow-xs'
+                      : 'bg-white border-gray-200 hover:border-green-300 hover:bg-gray-50/70'
+                  }`}
+                >
+                  <div
+                    className={`w-12 h-12 rounded-xl flex items-center justify-center text-2xl shrink-0 ${visual.surface}`}
+                  >
+                    {visual.emoji}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="font-bold text-sm text-gray-900 truncate">{cat}</p>
+                    <p className="text-xs text-gray-500 tabular-nums mt-0.5">
+                      {count} {count === 1 ? 'item' : 'items'}
+                    </p>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Category-wise Produce Shelves below All Categories */}
+        {!productsLoading && products.length > 0 && (
+          <div className="space-y-8">
+            {visibleCategorySections.map((cat) => {
+              const catProducts = productsByCategory[cat] || [];
+              const visual = getCategoryVisual(cat);
+
+              return (
+                <div key={cat} className="space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span
+                        className={`w-9 h-9 rounded-xl flex items-center justify-center text-lg shrink-0 ${visual.surface}`}
+                        aria-hidden="true"
+                      >
+                        {visual.emoji}
+                      </span>
+                      <div className="min-w-0">
+                        <h3 className="font-bold text-base text-gray-900 truncate">{cat}</h3>
+                        <p className="text-xs text-gray-500 truncate">
+                          {visual.tagline} · <span className="tabular-nums">{catProducts.length} items</span>
+                        </p>
+                      </div>
+                    </div>
+
+                    <Link
+                      to="/browse"
+                      onClick={() => setSelectedCategory(cat)}
+                      className="text-green-700 hover:text-green-800 text-xs font-semibold flex items-center gap-1 whitespace-nowrap shrink-0"
+                    >
+                      Explore {cat} <ArrowRight size={13} />
+                    </Link>
+                  </div>
+
+                  {catProducts.length > 0 ? (
+                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
+                      {catProducts.map((product) => (
+                        <div key={product.id}>
+                          <ProductCard product={product} />
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="bg-white border border-gray-200 rounded-xl p-4 flex items-center justify-between gap-3 text-xs text-gray-500">
+                      <span>No items currently listed under {cat}.</span>
+                      <Link
+                        to="/browse"
+                        onClick={() => setSelectedCategory('All')}
+                        className="text-green-700 font-semibold hover:underline shrink-0"
+                      >
+                        View all produce
+                      </Link>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
     </div>
   );
 };

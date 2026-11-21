@@ -15,7 +15,7 @@ import {
   PackagePlus,
   Clock
 } from 'lucide-react';
-import { formatCurrency } from '../../lib/utils';
+import { formatCurrency, formatPaymentMethodLabel } from '../../lib/utils';
 import { DeliveryNavbar } from '../../components/DeliveryNavbar';
 
 export const DeliveryDashboard = () => {
@@ -349,7 +349,7 @@ export const DeliveryDashboard = () => {
                       </span>
                     ) : (
                       <span className="flex items-center gap-1 text-green-400 text-xs font-bold bg-green-500/10 px-2 py-0.5 rounded border border-green-500/20">
-                        PAID ONLINE ({formatCurrency(item.total)})
+                        PAID ({formatPaymentMethodLabel(item.paymentMethod)} • {formatCurrency(item.total)})
                       </span>
                     )}
                   </div>
@@ -445,7 +445,7 @@ export const DeliveryDashboard = () => {
                         </span>
                       ) : (
                         <span className="flex items-center gap-1 text-green-400 text-xs font-bold bg-green-500/10 px-2 py-0.5 rounded border border-green-500/20">
-                          PAID ONLINE ({formatCurrency(order.total)})
+                          PAID ({formatPaymentMethodLabel(order.paymentMethod)} • {formatCurrency(order.total)})
                         </span>
                       )}
                     </div>

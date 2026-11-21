@@ -40,12 +40,32 @@ import { Address, DispatchFeedItem, Order, User } from '../lib/data';
 
 export interface PlaceOrderInput {
   items: Order['items'];
+  subtotal?: number;
+  taxRate?: number;
+  taxAmount?: number;
+  deliveryFee?: number;
+  discountAmount?: number;
+  couponCode?: string;
   total: number;
   deliverySlot: string;
   address: Address;
-  paymentMethod: 'cod' | 'upi';
+  paymentMethod: Order['paymentMethod'];
+  paymentStatus?: Order['paymentStatus'];
+  paymentReference?: string;
+  paymentChannelLabel?: string;
+  settlementTargetSummary?: string;
+  cardLast4?: string;
+  cardNetwork?: string;
   customerName: string;
   customerPhone: string;
+}
+
+export interface UpdateOrderDetailsInput {
+  date?: string;
+  deliverySlot?: string;
+  customerName?: string;
+  customerPhone?: string;
+  address?: Partial<Address>;
 }
 
 export interface AdminAllowlistEntry {
@@ -87,6 +107,7 @@ interface AuthContextType {
     status: Order['status'],
     paymentStatus?: Order['paymentStatus']
   ) => Promise<void>;
+  updateOrderDetails: (orderId: string, updates: UpdateOrderDetailsInput) => Promise<void>;
   assignOrderToDelivery: (
     orderId: string,
     deliveryUid: string,
@@ -618,26 +639,83 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const nowIso = new Date().toISOString();
 
     const sanitizedAddress: Address = {
-      id: input.address.id.slice(0, 64),
-      label: input.address.label.slice(0, 40),
-      street: input.address.street.slice(0, 300),
-      city: input.address.city.slice(0, 100),
-      zip: input.address.zip.slice(0, 20)
+      id: (input.address.id || 'addr_1').trim().slice(0, 64) || 'addr_1',
+      label: (input.address.label || 'Home').trim().slice(0, 40) || 'Home',
+      street: (input.address.street || '').trim().slice(0, 300) || 'Main Street',
+      city: (input.address.city || '').trim().slice(0, 100) || 'Local City',
+      zip: (input.address.zip || '').trim().slice(0, 20) || '000000'
     };
+
+    const computedItemsSubtotal = Math.round(
+      input.items.reduce(
+        (sum, item) =>
+          sum + (Math.max(0, Number(item.pricePerKg) || 0) / 1000) * Math.max(0, Number(item.selectedWeight) || 0) * Math.max(0, Number(item.quantity) || 0),
+        0
+      )
+    );
+    const sanitizedSubtotal = Math.max(
+      0,
+      Math.min(
+        1000000,
+        Math.round(typeof input.subtotal === 'number' && Number.isFinite(input.subtotal) ? input.subtotal : computedItemsSubtotal)
+      )
+    );
+    const sanitizedTaxRate = Math.max(
+      0,
+      Math.min(50, Number(input.taxRate) || 0)
+    );
+    const sanitizedTaxAmount = Math.max(
+      0,
+      Math.min(500000, Math.round(Number(input.taxAmount) || 0))
+    );
+    const sanitizedDeliveryFee = Math.max(
+      0,
+      Math.min(5000, Math.round(Number(input.deliveryFee) || 0))
+    );
+    const sanitizedDiscountAmount = Math.max(
+      0,
+      Math.min(100000, Math.round(Number(input.discountAmount) || 0))
+    );
+    const sanitizedCouponCode = (input.couponCode || '').trim().toUpperCase().slice(0, 32);
+
+    const sanitizedPaymentRef = (input.paymentReference || '').trim().slice(0, 100);
+    const sanitizedChannelLabel = (input.paymentChannelLabel || '').trim().slice(0, 100);
+    const sanitizedSettlementSummary = (input.settlementTargetSummary || '').trim().slice(0, 180);
+    const sanitizedCardLast4 = (input.cardLast4 || '').replace(/\D/g, '').slice(-4);
+    const validCardLast4 = /^[0-9]{4}$/.test(sanitizedCardLast4) ? sanitizedCardLast4 : '';
+    const sanitizedCardNetwork = (input.cardNetwork || '').trim().slice(0, 32);
+
+    const resolvedPaymentStatus: Order['paymentStatus'] =
+      input.paymentStatus && ['pending', 'collected', 'paid'].includes(input.paymentStatus)
+        ? input.paymentStatus
+        : input.paymentMethod === 'cod'
+        ? 'pending'
+        : 'paid';
 
     const orderDoc: Order = {
       id: orderId,
       userId: firebaseUser.uid,
-      customerName: input.customerName.trim().slice(0, 120),
+      customerName: (input.customerName.trim() || 'FreshVeggie Customer').slice(0, 120),
       customerPhone: cleanPhone,
       items: input.items.slice(0, 50),
-      total: Math.max(0, Math.round(input.total)),
+      subtotal: sanitizedSubtotal,
+      taxRate: sanitizedTaxRate,
+      taxAmount: sanitizedTaxAmount,
+      deliveryFee: sanitizedDeliveryFee,
+      discountAmount: sanitizedDiscountAmount,
+      couponCode: sanitizedCouponCode,
+      total: Math.max(0, Math.min(1000000, Math.round(input.total))),
       status: 'placed',
       date: nowIso,
       deliverySlot: input.deliverySlot.slice(0, 120),
       address: sanitizedAddress,
       paymentMethod: input.paymentMethod,
-      paymentStatus: input.paymentMethod === 'upi' ? 'paid' : 'pending',
+      paymentStatus: resolvedPaymentStatus,
+      ...(sanitizedPaymentRef ? { paymentReference: sanitizedPaymentRef } : {}),
+      ...(sanitizedChannelLabel ? { paymentChannelLabel: sanitizedChannelLabel } : {}),
+      ...(sanitizedSettlementSummary ? { settlementTargetSummary: sanitizedSettlementSummary } : {}),
+      ...(validCardLast4 ? { cardLast4: validCardLast4 } : {}),
+      ...(sanitizedCardNetwork ? { cardNetwork: sanitizedCardNetwork } : {}),
       deliveryPin,
       assignedToUid: '',
       assignedToName: '',
@@ -682,6 +760,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     paymentStatus?: Order['paymentStatus']
   ): Promise<void> => {
     try {
+      const feedSnap = isAdmin
+        ? await getDoc(doc(db, 'dispatchFeed', orderId)).catch(() => null)
+        : null;
       const batch = writeBatch(db);
       const orderUpdate: Record<string, unknown> = {
         status,
@@ -692,11 +773,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       batch.update(doc(db, 'orders', orderId), orderUpdate);
-      batch.update(doc(db, 'dispatchFeed', orderId), {
-        status,
-        updatedAt: serverTimestamp()
-      });
-      if (status === 'delivered' || status === 'cancelled') {
+      if (!isAdmin || feedSnap?.exists()) {
+        batch.update(doc(db, 'dispatchFeed', orderId), {
+          status,
+          updatedAt: serverTimestamp()
+        });
+      }
+      if ((status === 'delivered' || status === 'cancelled') && isAdmin) {
         batch.delete(doc(db, 'active_deliveries', orderId));
       }
       await batch.commit();
@@ -708,6 +791,120 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           paymentStatus: paymentStatus || matched.paymentStatus
         });
       }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `orders/${orderId}`);
+    }
+  };
+
+  const updateOrderDetails = async (
+    orderId: string,
+    updates: UpdateOrderDetailsInput
+  ): Promise<void> => {
+    if (!isAdmin) {
+      throw new Error('Only store administrators can edit order details.');
+    }
+
+    let currentOrder = allOrders.find((o) => o.id === orderId) || orders.find((o) => o.id === orderId);
+    if (!currentOrder) {
+      const orderSnap = await getDoc(doc(db, 'orders', orderId));
+      if (orderSnap.exists()) {
+        currentOrder = { ...(orderSnap.data() as Order), id: orderSnap.id };
+      }
+    }
+    if (!currentOrder) {
+      throw new Error(`Order #${orderId} could not be found.`);
+    }
+
+    const cleanPhone =
+      updates.customerPhone !== undefined
+        ? updates.customerPhone.replace(/\D/g, '').slice(0, 15)
+        : currentOrder.customerPhone;
+    if (!/^[0-9]{10,15}$/.test(cleanPhone)) {
+      throw new Error('Customer phone number must contain 10 to 15 digits.');
+    }
+
+    const cleanCustomerName = (
+      updates.customerName !== undefined ? updates.customerName : currentOrder.customerName
+    )
+      .trim()
+      .slice(0, 120);
+    if (!cleanCustomerName) {
+      throw new Error('Customer name cannot be empty.');
+    }
+
+    let nextDate = currentOrder.date;
+    if (updates.date !== undefined) {
+      const parsed = new Date(updates.date);
+      if (Number.isNaN(parsed.getTime())) {
+        throw new Error('Please enter a valid order date.');
+      }
+      nextDate = parsed.toISOString().slice(0, 64);
+    }
+
+    const nextSlot = (
+      updates.deliverySlot !== undefined ? updates.deliverySlot : currentOrder.deliverySlot
+    )
+      .trim()
+      .slice(0, 120);
+    if (!nextSlot) {
+      throw new Error('Delivery slot cannot be empty.');
+    }
+
+    const existingAddr = currentOrder.address || {
+      id: 'addr_1',
+      label: 'Home',
+      street: '',
+      city: '',
+      zip: ''
+    };
+    const nextAddress: Address = {
+      id: (existingAddr.id || 'addr_1').trim().slice(0, 64) || 'addr_1',
+      label: (updates.address?.label ?? existingAddr.label ?? 'Home').trim().slice(0, 40) || 'Home',
+      street: (updates.address?.street ?? existingAddr.street ?? '').trim().slice(0, 300),
+      city: (updates.address?.city ?? existingAddr.city ?? '').trim().slice(0, 100),
+      zip: (updates.address?.zip ?? existingAddr.zip ?? '').trim().slice(0, 20)
+    };
+
+    if (!nextAddress.street) {
+      throw new Error('Street address is required.');
+    }
+    if (!nextAddress.city) {
+      throw new Error('City is required.');
+    }
+    if (nextAddress.zip.length < 3) {
+      throw new Error('Pincode must be at least 3 characters.');
+    }
+
+    try {
+      const feedSnap = await getDoc(doc(db, 'dispatchFeed', orderId)).catch(() => null);
+      const batch = writeBatch(db);
+      batch.update(doc(db, 'orders', orderId), {
+        date: nextDate,
+        deliverySlot: nextSlot,
+        customerName: cleanCustomerName,
+        customerPhone: cleanPhone,
+        address: nextAddress,
+        updatedAt: serverTimestamp()
+      });
+
+      if (feedSnap?.exists()) {
+        batch.update(doc(db, 'dispatchFeed', orderId), {
+          city: nextAddress.city.slice(0, 80),
+          zip: nextAddress.zip.slice(0, 20),
+          deliverySlot: nextSlot,
+          updatedAt: serverTimestamp()
+        });
+      }
+
+      await batch.commit();
+      archiveOrderAsync({
+        ...currentOrder,
+        date: nextDate,
+        deliverySlot: nextSlot,
+        customerName: cleanCustomerName,
+        customerPhone: cleanPhone,
+        address: nextAddress
+      });
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `orders/${orderId}`);
     }
@@ -728,20 +925,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       }
       const nextStatus = currentOrder?.status === 'placed' ? 'packed' : (currentOrder?.status || 'packed');
+      const safePartnerName = (deliveryName.trim() || 'Delivery Partner').slice(0, 120);
+      const safePartnerCode = (deliveryCode.trim() || 'DEL').slice(0, 32);
+
+      const feedSnap = await getDoc(doc(db, 'dispatchFeed', orderId)).catch(() => null);
 
       const batch = writeBatch(db);
       batch.update(doc(db, 'orders', orderId), {
         assignedToUid: deliveryUid,
-        assignedToName: deliveryName.slice(0, 120),
-        assignedToCode: deliveryCode.slice(0, 32),
+        assignedToName: safePartnerName,
+        assignedToCode: safePartnerCode,
         status: nextStatus,
         updatedAt: serverTimestamp()
       });
-      batch.update(doc(db, 'dispatchFeed', orderId), {
-        assignedToUid: deliveryUid,
-        status: nextStatus,
-        updatedAt: serverTimestamp()
-      });
+      if (feedSnap?.exists()) {
+        batch.update(doc(db, 'dispatchFeed', orderId), {
+          assignedToUid: deliveryUid,
+          status: nextStatus,
+          updatedAt: serverTimestamp()
+        });
+      }
       if (currentOrder?.userId && nextStatus !== 'delivered' && nextStatus !== 'cancelled') {
         const activeStatus =
           nextStatus === 'out_for_delivery'
@@ -753,7 +956,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           orderId,
           customerUid: currentOrder.userId,
           partnerUid: deliveryUid,
-          partnerName: deliveryName.slice(0, 120),
+          partnerName: safePartnerName,
           status: activeStatus,
           lat: 28.6139,
           lng: 77.2090,
@@ -811,6 +1014,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         loadMoreOrders,
         placeOrder,
         updateOrderStatus,
+        updateOrderDetails,
         assignOrderToDelivery,
         allUsers,
         hasMoreUsers,

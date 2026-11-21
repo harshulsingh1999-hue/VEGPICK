@@ -72,9 +72,56 @@ async function startServer() {
   const cloud = createCloudStack(__dirname, firebaseMeta);
   app.use('/uploads', express.static(cloud.uploadsDir, { maxAge: '365d', immutable: true }));
 
+  // Live per-endpoint Server & API Quota Usage Telemetry
+  app.use('/api', (req, res, next) => {
+    const startMs = performance.now();
+    const p = req.path || '';
+    res.on('finish', () => {
+      let endpointId = '';
+      if (p === '/health') endpointId = 'api-health';
+      else if (p === '/public/runtime-config') endpointId = 'api-runtime-config';
+      else if (p === '/catalog/bootstrap') endpointId = 'api-bootstrap';
+      else if (p === '/catalog/invalidate') endpointId = 'api-invalidate';
+      else if (p === '/orders/verify-stock') endpointId = 'api-verify-stock';
+      else if (p === '/orders/quote') endpointId = 'api-quote';
+      else if (p === '/slots') endpointId = 'api-slots';
+      else if (p === '/media/upload') endpointId = 'api-media-upload';
+      else if (p === '/archive/order' || p === '/archive/ledger') endpointId = 'api-archive-order';
+      else if (p === '/analytics/summary') endpointId = 'api-analytics-summary';
+      else if (p.startsWith('/admin/databases')) endpointId = 'api-admin-databases';
+      else if (p.startsWith('/admin/servers')) endpointId = 'api-admin-servers';
+      if (!endpointId) return;
+
+      const xCache = String(res.getHeader('X-Cache') || '');
+      const xCatalog = String(res.getHeader('X-Catalog-Source') || '');
+      const cacheHit =
+        xCache.startsWith('HIT') ||
+        xCatalog === 'memory-l1' ||
+        xCatalog === 'upstash-l2';
+      cloud.recordApiUsage(endpointId, {
+        latencyMs: performance.now() - startMs,
+        statusCode: res.statusCode,
+        cacheHit,
+        rateLimited: res.statusCode === 429
+      });
+    });
+    next();
+  });
+
   const applyRateLimit =
-    (bucket: string, maxRequests: number, windowSeconds: number): express.RequestHandler =>
+    (bucket: 'upload' | 'verify-stock' | 'quote' | 'archive' | 'invalidate', windowSeconds: number): express.RequestHandler =>
     async (req, res, next) => {
+      const limits = cloud.getServerControlConfig().rateLimits;
+      const maxRequests =
+        bucket === 'upload'
+          ? limits.uploadPerMin
+          : bucket === 'verify-stock'
+          ? limits.verifyStockPerMin
+          : bucket === 'quote'
+          ? limits.quotePerMin
+          : bucket === 'archive'
+          ? limits.archivePerMin
+          : limits.invalidatePerMin;
       const clientIp = (req.ip || req.socket.remoteAddress || 'unknown').slice(0, 64);
       const result = await cloud.checkRateLimit(bucket, clientIp, maxRequests, windowSeconds);
       res.setHeader('X-RateLimit-Remaining', String(result.remaining));
@@ -87,6 +134,17 @@ async function startServer() {
       }
       next();
     };
+
+  const requireAdmin: express.RequestHandler = async (req, res, next) => {
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const check = await cloud.verifyFirebaseAdminToken(token);
+    if (!check.authorized) {
+      res.status(401).json({ error: check.reason || 'Admin authorization required.' });
+      return;
+    }
+    next();
+  };
 
   // Health & Multi-Cloud Diagnostics API
   app.get('/api/health', (_req, res) => {
@@ -118,17 +176,37 @@ async function startServer() {
     });
   });
 
+  // Public Dynamic Failover Origin Config (consumed by apiClient.ts)
+  app.get('/api/public/runtime-config', (_req, res) => {
+    const cfg = cloud.getServerControlConfig();
+    res.setHeader('Cache-Control', 'public, max-age=30, stale-while-revalidate=60');
+    res.json({
+      autoServerFailover: cfg.autoServerFailover,
+      serverNodes: cfg.serverNodes
+        .filter((n) => n.enabled)
+        .sort((a, b) => a.priority - b.priority)
+    });
+  });
+
   // Edge-Cached Storefront Bootstrap API (eliminates millions of direct Firestore reads at 1M DAU)
   app.get('/api/catalog/bootstrap', async (req, res) => {
     const payload = await cloud.getCatalogBootstrap();
+    const ttlSec = cloud.getServerControlConfig().catalogTtlSeconds || 120;
     const etag = `"${crypto
       .createHash('sha1')
-      .update(JSON.stringify({ p: payload.products, c: payload.coupons, s: payload.settings }))
+      .update(
+        JSON.stringify({
+          p: payload.products,
+          c: payload.coupons,
+          a: payload.serviceAreas,
+          s: payload.settings
+        })
+      )
       .digest('hex')}"`;
 
     res.setHeader(
       'Cache-Control',
-      'public, max-age=30, s-maxage=120, stale-while-revalidate=600'
+      `public, max-age=30, s-maxage=${ttlSec}, stale-while-revalidate=600`
     );
     res.setHeader('ETag', etag);
     res.setHeader('X-Catalog-Source', payload.source);
@@ -141,13 +219,13 @@ async function startServer() {
     res.json(payload);
   });
 
-  app.post('/api/catalog/invalidate', applyRateLimit('invalidate', 30, 60), async (_req, res) => {
+  app.post('/api/catalog/invalidate', applyRateLimit('invalidate', 60), async (_req, res) => {
     await cloud.invalidateCatalogCache();
     res.json({ ok: true });
   });
 
   // Compressed Media Upload Endpoint (< 300 KB -> Cloudflare R2 or Express Static Fallback)
-  app.post('/api/media/upload', applyRateLimit('upload', 25, 60), async (req, res) => {
+  app.post('/api/media/upload', applyRateLimit('upload', 60), async (req, res) => {
     const body = (req.body || {}) as {
       base64?: string;
       mimeType?: string;
@@ -232,15 +310,18 @@ async function startServer() {
       };
     });
 
+    const slotsTtlSec = cloud.getServerControlConfig().slotsTtlSeconds || 60;
     const payload = { days };
-    await cloud.setCached(cacheKey, payload, 60_000);
+    await cloud.setCached(cacheKey, payload, slotsTtlSec * 1000);
     res.setHeader('X-Cache', 'MISS');
     res.json(payload);
   });
 
-  // Pre-Checkout Authoritative Stock, Store Status & Pack-Weight Verification API
-  app.post('/api/orders/verify-stock', applyRateLimit('verify-stock', 60, 60), async (req, res) => {
+  // Pre-Checkout Authoritative Stock, Store Status, Area/Pincode Fence & Pack-Weight Verification API
+  app.post('/api/orders/verify-stock', applyRateLimit('verify-stock', 60), async (req, res) => {
     const items = Array.isArray(req.body?.items) ? (req.body.items as VerifyStockItemInput[]) : [];
+    const requestedPincode =
+      typeof req.body?.pincode === 'string' ? req.body.pincode.replace(/\D/g, '').trim() : '';
     if (items.length === 0) {
       res.status(400).json({ ok: false, error: 'Cart is empty.' });
       return;
@@ -254,6 +335,24 @@ async function startServer() {
         error: 'Store is currently paused by administration and not accepting new orders.'
       });
       return;
+    }
+
+    const activeAreas = (bootstrap.serviceAreas || []).filter((a) => a.isActive !== false);
+    const matchedArea = requestedPincode
+      ? activeAreas.find((a) => String(a.pincode || '').replace(/\D/g, '') === requestedPincode) || null
+      : null;
+
+    if (bootstrap.settings?.restrictToServiceAreas === true) {
+      if (!requestedPincode || !matchedArea) {
+        res.status(409).json({
+          ok: false,
+          areaRestricted: true,
+          error: requestedPincode
+            ? `Pincode ${requestedPincode} is outside our currently enabled local delivery zones.`
+            : 'Please select a delivery address with an approved local pincode.'
+        });
+        return;
+      }
     }
 
     const liveCatalogMap = new Map<string, { available?: boolean; name?: string }>();
@@ -312,11 +411,11 @@ async function startServer() {
       return;
     }
 
-    res.json({ ok: true, verifiedCount: items.length, catalogSource: bootstrap.source });
+    res.json({ ok: true, verifiedCount: items.length, catalogSource: bootstrap.source, matchedArea });
   });
 
-  // Server-side Pricing & Order Quote Verification API (L1/L2 30s TTL cached)
-  app.post('/api/orders/quote', applyRateLimit('quote', 90, 60), async (req, res) => {
+  // Server-side Pricing & Order Quote Verification API (L1/L2 TTL cached)
+  app.post('/api/orders/quote', applyRateLimit('quote', 60), async (req, res) => {
     const body = (req.body || {}) as QuoteRequestBody;
     const items = Array.isArray(body.items) ? body.items.slice(0, 50) : [];
     const taxRate = Math.max(0, Math.min(50, Number(body.taxRate) || 0));
@@ -379,13 +478,14 @@ async function startServer() {
       discount,
       total
     };
-    await cloud.setCached(cacheKey, quote, 30_000);
+    const quoteTtlSec = cloud.getServerControlConfig().quoteTtlSeconds || 30;
+    await cloud.setCached(cacheKey, quote, quoteTtlSec * 1000);
     res.setHeader('X-Cache', 'MISS');
     res.json(quote);
   });
 
   // Multi-Database Relational Archive & SQL Analytics Endpoints (SQLite WAL + Supabase Postgres)
-  app.post('/api/archive/order', applyRateLimit('archive', 120, 60), async (req, res) => {
+  app.post('/api/archive/order', applyRateLimit('archive', 60), async (req, res) => {
     const b = (req.body || {}) as Record<string, unknown>;
     const id = typeof b.id === 'string' ? b.id.trim().slice(0, 128) : '';
     const userId = typeof b.userId === 'string' ? b.userId.trim().slice(0, 128) : '';
@@ -400,7 +500,7 @@ async function startServer() {
       city: typeof b.city === 'string' ? b.city.trim().slice(0, 80) : '',
       total: Math.max(0, Number(b.total) || 0),
       status: typeof b.status === 'string' ? b.status.slice(0, 32) : 'placed',
-      paymentMethod: typeof b.paymentMethod === 'string' ? b.paymentMethod.slice(0, 16) : 'cod',
+      paymentMethod: typeof b.paymentMethod === 'string' ? b.paymentMethod.slice(0, 24) : 'cod',
       paymentStatus: typeof b.paymentStatus === 'string' ? b.paymentStatus.slice(0, 20) : 'pending',
       assignedToUid: typeof b.assignedToUid === 'string' ? b.assignedToUid.slice(0, 128) : '',
       itemCount: Math.max(0, Number(b.itemCount) || 0),
@@ -409,7 +509,7 @@ async function startServer() {
     res.status(202).json({ ok: true });
   });
 
-  app.post('/api/archive/ledger', applyRateLimit('archive', 120, 60), async (req, res) => {
+  app.post('/api/archive/ledger', applyRateLimit('archive', 60), async (req, res) => {
     const b = (req.body || {}) as Record<string, unknown>;
     const id = typeof b.id === 'string' ? b.id.trim().slice(0, 128) : '';
     const partnerUid = typeof b.partnerUid === 'string' ? b.partnerUid.trim().slice(0, 128) : '';
@@ -431,6 +531,50 @@ async function startServer() {
   app.get('/api/analytics/summary', (_req, res) => {
     res.setHeader('Cache-Control', 'public, max-age=15, stale-while-revalidate=45');
     res.json(cloud.getSqlAnalyticsSummary());
+  });
+
+  // Super Admin Database Control Center APIs
+  app.get('/api/admin/databases', requireAdmin, async (_req, res) => {
+    try {
+      const report = await cloud.getDatabasesReport();
+      res.json(report);
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Unable to inspect database telemetry.'
+      });
+    }
+  });
+
+  app.post('/api/admin/databases/config', requireAdmin, async (req, res) => {
+    const updated = cloud.updateDbControlConfig((req.body || {}) as Record<string, unknown>);
+    await cloud.invalidateCatalogCache();
+    res.json({ ok: true, controlConfig: updated });
+  });
+
+  app.post('/api/admin/databases/action', requireAdmin, async (req, res) => {
+    const action = typeof req.body?.action === 'string' ? req.body.action : '';
+    const result = await cloud.runDatabaseAction(action);
+    res.status(result.ok ? 200 : 400).json(result);
+  });
+
+  // Super Admin Server & API Control Center APIs
+  app.get('/api/admin/servers', requireAdmin, (_req, res) => {
+    res.json(cloud.getServersAndApisReport(PORT));
+  });
+
+  app.post('/api/admin/servers/config', requireAdmin, (req, res) => {
+    const updated = cloud.updateServerControlConfig((req.body || {}) as Record<string, unknown>);
+    res.json({ ok: true, controlConfig: updated });
+  });
+
+  app.post('/api/admin/servers/probe', requireAdmin, async (req, res) => {
+    const target = typeof req.body?.target === 'string' ? req.body.target : '';
+    const result = await cloud.probeServerOrApi(target, PORT);
+    res.json(result);
+  });
+
+  app.post('/api/admin/servers/reset-usage', requireAdmin, (_req, res) => {
+    res.json(cloud.resetApiQuotaUsage());
   });
 
   // Explicit 404 for unknown API or missing uploaded media paths so SPA fallback never intercepts them
@@ -458,10 +602,19 @@ async function startServer() {
           next();
           return;
         }
-        const safeCode = result.code.replace(
-          'transport.connect(createHMRHandler(handleMessage));',
-          '/* Vite HMR WebSocket disabled in preview */'
-        );
+        const safeCode = result.code
+          .replace(
+            'transport.connect(createHMRHandler(handleMessage));',
+            '/* Vite HMR WebSocket disabled in preview */'
+          )
+          .replace(
+            'throw new Error("send was called before connect");',
+            'return;'
+          )
+          .replace(
+            'throw new Error("invoke was called before connect");',
+            'return null;'
+          );
         res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
         res.setHeader('Cache-Control', 'no-store');
         res.send(safeCode);

@@ -8,6 +8,8 @@ export interface Product {
   description: string;
   rating: number;
   reviews: number;
+  createdAt?: unknown;
+  updatedAt?: unknown;
 }
 
 export interface CartItem extends Product {
@@ -40,13 +42,24 @@ export interface Order {
   customerName: string;
   customerPhone: string;
   items: CartItem[];
+  subtotal?: number;
+  taxRate?: number;
+  taxAmount?: number;
+  deliveryFee?: number;
+  discountAmount?: number;
+  couponCode?: string;
   total: number;
   status: 'placed' | 'packed' | 'out_for_delivery' | 'delivered' | 'cancelled';
   date: string;
   deliverySlot: string;
   address: Address;
-  paymentMethod: 'cod' | 'upi';
+  paymentMethod: 'cod' | 'upi' | 'debit_card' | 'credit_card' | 'bank_transfer';
   paymentStatus: 'pending' | 'collected' | 'paid';
+  paymentReference?: string;
+  paymentChannelLabel?: string;
+  settlementTargetSummary?: string;
+  cardLast4?: string;
+  cardNetwork?: string;
   deliveryPin: string;
   assignedToUid: string;
   assignedToName: string;
@@ -62,7 +75,7 @@ export interface DispatchFeedItem {
   deliverySlot: string;
   itemCount: number;
   total: number;
-  paymentMethod: 'cod' | 'upi';
+  paymentMethod: 'cod' | 'upi' | 'debit_card' | 'credit_card' | 'bank_transfer';
   status: 'placed' | 'packed' | 'out_for_delivery' | 'delivered' | 'cancelled';
   assignedToUid: string;
 }
@@ -135,6 +148,18 @@ export interface Complaint {
   resolutionNotes?: string;
 }
 
+export interface ServiceArea {
+  id: string;
+  name: string;
+  city: string;
+  pincode: string;
+  isActive: boolean;
+  deliveryFeeOverride?: number | null;
+  minOrderOverride?: number | null;
+  etaMinutes: number;
+  notes?: string;
+}
+
 export interface AppSettings {
   taxRate: number;
   baseDeliveryFee: number;
@@ -142,6 +167,19 @@ export interface AppSettings {
   storeOpen: boolean;
   notificationsEnabled: boolean;
   catalogInitialized?: boolean;
+  restrictToServiceAreas?: boolean;
+  upiId?: string;
+  upiPayeeName?: string;
+  bankAccountHolder?: string;
+  bankName?: string;
+  bankAccountNumber?: string;
+  bankBranch?: string;
+  bankIfscCode?: string;
+  acceptUpi?: boolean;
+  acceptDebitCard?: boolean;
+  acceptCreditCard?: boolean;
+  acceptBankTransfer?: boolean;
+  acceptCod?: boolean;
 }
 
 export const CATEGORIES = [
@@ -159,5 +197,19 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   freeDeliveryThreshold: 100,
   storeOpen: true,
   notificationsEnabled: true,
-  catalogInitialized: false
+  catalogInitialized: false,
+  restrictToServiceAreas: false,
+  upiId: '',
+  upiPayeeName: 'FreshVeggie Delivery',
+  bankAccountHolder: '',
+  bankName: '',
+  bankAccountNumber: '',
+  bankBranch: '',
+  bankIfscCode: '',
+  acceptUpi: true,
+  acceptDebitCard: true,
+  acceptCreditCard: true,
+  acceptBankTransfer: true,
+  acceptCod: true
 };
+

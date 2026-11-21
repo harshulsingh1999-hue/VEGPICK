@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { useAuth } from '../context/AuthContext';
 import { useStore } from '../context/StoreContext';
-import { formatCurrency } from '../lib/utils';
+import { formatCurrency, formatPaymentMethodLabel, getOrderBillingBreakdown } from '../lib/utils';
 import { db } from '../lib/firebase';
 import { ActiveDelivery } from '../lib/data';
 import {
@@ -18,7 +18,9 @@ import {
   MessageSquare,
   KeyRound,
   Navigation,
-  Camera
+  Camera,
+  XCircle,
+  Tag
 } from 'lucide-react';
 import { useToast } from '../context/ToastContext';
 
@@ -33,7 +35,7 @@ export const OrderDetails = () => {
   const { id } = useParams();
   const navigate = useNavigate();
   const { orders, allOrders, user, firebaseUser, isAdmin } = useAuth();
-  const { addComplaint } = useStore();
+  const { addComplaint, appSettings } = useStore();
   const { showToast } = useToast();
 
   const [showComplaintModal, setShowComplaintModal] = useState(false);
@@ -247,36 +249,50 @@ export const OrderDetails = () => {
       {/* Tracking Timeline */}
       <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 mb-5">
         <h2 className="font-bold text-gray-800 text-sm mb-4">Live Tracking</h2>
-        <div className="relative pl-1">
-          <div className="absolute left-[13px] top-2 bottom-2 w-[2px] bg-gray-100"></div>
-          <div className="space-y-5 relative">
-            {STEPS.map((step, index) => {
-              const isCompleted = index <= currentStepIndex;
-              const isCurrent = index === currentStepIndex;
-
-              return (
-                <div key={step.id} className="flex items-start gap-4">
-                  <div className={`relative z-10 w-6 h-6 rounded-full flex items-center justify-center transition-all ${
-                    isCompleted ? 'bg-green-600 text-white shadow-sm' : 'bg-gray-200 text-gray-400'
-                  }`}>
-                    {isCompleted ? <CheckCircle size={14} /> : <Circle size={8} />}
-                  </div>
-                  <div>
-                    <p className={`text-sm font-semibold ${isCompleted ? 'text-gray-800' : 'text-gray-400'}`}>
-                      {step.label}
-                    </p>
-                    {isCurrent && order.status !== 'delivered' && (
-                      <p className="text-xs text-green-600 mt-0.5 font-medium animate-pulse">In Progress...</p>
-                    )}
-                    {isCompleted && !isCurrent && (
-                      <p className="text-xs text-gray-400 mt-0.5">Completed</p>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+        {order.status === 'cancelled' ? (
+          <div className="p-4 bg-red-50 border border-red-200 rounded-xl flex items-start gap-3">
+            <XCircle size={20} className="text-red-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-bold text-red-800">This order was cancelled</p>
+              <p className="text-xs text-red-700 mt-0.5">
+                {order.failureReason
+                  ? `Reason: ${order.failureReason}`
+                  : 'Order cancelled prior to delivery completion.'}
+              </p>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="relative pl-1">
+            <div className="absolute left-[13px] top-2 bottom-2 w-[2px] bg-gray-100"></div>
+            <div className="space-y-5 relative">
+              {STEPS.map((step, index) => {
+                const isCompleted = index <= currentStepIndex;
+                const isCurrent = index === currentStepIndex;
+
+                return (
+                  <div key={step.id} className="flex items-start gap-4">
+                    <div className={`relative z-10 w-6 h-6 rounded-full flex items-center justify-center transition-all ${
+                      isCompleted ? 'bg-green-600 text-white shadow-sm' : 'bg-gray-200 text-gray-400'
+                    }`}>
+                      {isCompleted ? <CheckCircle size={14} /> : <Circle size={8} />}
+                    </div>
+                    <div>
+                      <p className={`text-sm font-semibold ${isCompleted ? 'text-gray-800' : 'text-gray-400'}`}>
+                        {step.label}
+                      </p>
+                      {isCurrent && order.status !== 'delivered' && (
+                        <p className="text-xs text-green-600 mt-0.5 font-medium animate-pulse">In Progress...</p>
+                      )}
+                      {isCompleted && !isCurrent && (
+                        <p className="text-xs text-gray-400 mt-0.5">Completed</p>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {order.status === 'delivered' && (
           <div className="mt-5 pt-4 border-t border-gray-100 space-y-3">
@@ -341,10 +357,46 @@ export const OrderDetails = () => {
             </div>
           ))}
 
-          <div className="pt-3 border-t border-gray-100 flex justify-between items-center font-bold text-base">
-            <span className="text-gray-700">Total Paid</span>
-            <span className="text-green-700">{formatCurrency(order.total)}</span>
-          </div>
+          {(() => {
+            const billing = getOrderBillingBreakdown(order, appSettings);
+            return (
+              <div className="pt-3 mt-2 border-t border-gray-100 space-y-2 text-xs">
+                <div className="flex justify-between text-gray-600">
+                  <span>Order Total (Items Subtotal)</span>
+                  <span className="font-semibold text-gray-800">{formatCurrency(billing.subtotal)}</span>
+                </div>
+                <div className="flex justify-between text-gray-600">
+                  <span>+ GST / Taxes{billing.taxRate > 0 ? ` (${billing.taxRate}%)` : ''}</span>
+                  <span className="font-semibold text-gray-800">+ {formatCurrency(billing.taxAmount)}</span>
+                </div>
+                <div className="flex justify-between text-gray-600">
+                  <span>+ Delivery Fees</span>
+                  {billing.deliveryFee === 0 ? (
+                    <span className="font-bold text-green-600">Free (₹0)</span>
+                  ) : (
+                    <span className="font-semibold text-gray-800">+ {formatCurrency(billing.deliveryFee)}</span>
+                  )}
+                </div>
+                {(billing.discountAmount > 0 || billing.couponCode) && (
+                  <div className="flex justify-between items-center text-green-700 font-medium">
+                    <span className="inline-flex items-center gap-1.5">
+                      - Discount Coupon
+                      {billing.couponCode && (
+                        <span className="inline-flex items-center gap-1 bg-green-100 text-green-800 px-1.5 py-0.5 rounded font-mono font-bold text-[10px]">
+                          <Tag size={10} /> {billing.couponCode}
+                        </span>
+                      )}
+                    </span>
+                    <span className="font-bold">- {formatCurrency(billing.discountAmount)}</span>
+                  </div>
+                )}
+                <div className="pt-2.5 border-t border-gray-200 flex justify-between items-center font-bold text-base">
+                  <span className="text-gray-800">Grand Total</span>
+                  <span className="text-green-700">{formatCurrency(billing.grandTotal)}</span>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </div>
 
@@ -371,8 +423,23 @@ export const OrderDetails = () => {
 
         <div className="pt-3 border-t border-gray-100 flex justify-between items-center text-sm">
           <span className="text-gray-600">Payment Mode</span>
-          <span className="font-bold uppercase text-gray-800">{order.paymentMethod}</span>
+          <span className="font-bold text-gray-800">
+            {order.paymentChannelLabel || formatPaymentMethodLabel(order.paymentMethod)}
+            {order.cardLast4 ? ` (${order.cardNetwork || 'Card'} •••• ${order.cardLast4})` : ''}
+          </span>
         </div>
+        {order.paymentReference && (
+          <div className="flex justify-between items-center text-sm">
+            <span className="text-gray-600">Payment Reference / UTR</span>
+            <span className="font-mono text-xs font-bold text-gray-800">{order.paymentReference}</span>
+          </div>
+        )}
+        {order.settlementTargetSummary && (
+          <div className="flex justify-between items-start gap-3 text-sm">
+            <span className="text-gray-600 shrink-0">Settled To</span>
+            <span className="text-xs font-medium text-emerald-700 text-right">{order.settlementTargetSummary}</span>
+          </div>
+        )}
         <div className="flex justify-between items-center text-sm">
           <span className="text-gray-600">Payment Status</span>
           <span className={`px-2 py-0.5 rounded text-xs font-semibold ${

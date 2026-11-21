@@ -17,7 +17,7 @@ import {
   Radio,
   Camera
 } from 'lucide-react';
-import { formatCurrency } from '../../lib/utils';
+import { formatCurrency, formatPaymentMethodLabel } from '../../lib/utils';
 import { haversineDistanceMeters, uploadCompressedMedia } from '../../lib/imageUtils';
 
 export const DeliveryOrderDetails = () => {
@@ -203,7 +203,7 @@ export const DeliveryOrderDetails = () => {
                 <p className="text-[11px] text-gray-400">Order Total</p>
                 <p className="font-bold text-green-400">
                   {formatCurrency(dispatchItem.total)} (
-                  {dispatchItem.paymentMethod.toUpperCase()})
+                  {formatPaymentMethodLabel(dispatchItem.paymentMethod)})
                 </p>
               </div>
             </div>
@@ -523,7 +523,7 @@ export const DeliveryOrderDetails = () => {
                 {formatCurrency(assignedOrder.total)}
               </p>
               <p className="text-xs text-gray-400 mt-0.5">
-                Method: {assignedOrder.paymentMethod.toUpperCase()}
+                Method: {assignedOrder.paymentChannelLabel || formatPaymentMethodLabel(assignedOrder.paymentMethod)}
               </p>
             </div>
             <div

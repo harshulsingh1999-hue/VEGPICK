@@ -9,20 +9,33 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useDelivery } from '../../context/DeliveryContext';
+import { useStore } from '../../context/StoreContext';
 import { useToast } from '../../context/ToastContext';
 import { PhoneOtpAuthCard } from '../../components/PhoneOtpAuthCard';
+
+const FALLBACK_ZONES = ['Central Zone', 'Sector 14', 'Cyber City', 'Green Park', 'Dwarka', 'Rohini'];
 
 export const DeliveryRegister = () => {
   const navigate = useNavigate();
   const { firebaseUser, isAdmin, logout } = useAuth();
   const { deliveryUser, registerPartner } = useDelivery();
+  const { serviceAreas } = useStore();
   const { showToast } = useToast();
 
+  const availableZones = Array.from(
+    new Set([
+      ...serviceAreas.filter((a) => a.isActive).map((a) => `${a.name} (${a.pincode})`),
+      ...FALLBACK_ZONES
+    ])
+  );
+
   const [step, setStep] = useState(1);
+  const [useCustomArea, setUseCustomArea] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
     phone: '',
     area: 'Central Zone',
+    customArea: '',
     vehicle: 'Motorcycle',
     dlNumber: '',
     bankAccount: '',
@@ -43,10 +56,16 @@ export const DeliveryRegister = () => {
     }));
   }, [firebaseUser?.displayName, firebaseUser?.phoneNumber]);
 
+  const resolvedArea = (useCustomArea ? formData.customArea : formData.area).trim().slice(0, 80);
+
   const handleNext = (e: React.FormEvent) => {
     e.preventDefault();
     if (step === 1 && formData.phone.replace(/\D/g, '').length < 10) {
       showToast('Please enter a valid 10-digit mobile number.', 'error');
+      return;
+    }
+    if (step === 1 && useCustomArea && !resolvedArea) {
+      showToast('Please enter your city / area and pincode.', 'error');
       return;
     }
     setStep((s) => s + 1);
@@ -65,7 +84,7 @@ export const DeliveryRegister = () => {
       const created = await registerPartner({
         name: formData.name.trim(),
         phone: formData.phone.trim(),
-        area: formData.area,
+        area: resolvedArea || 'Central Zone',
         vehicle: formData.vehicle,
         dlNumber: formData.dlNumber.trim(),
         bankLast4: cleanAccount.slice(-4),
@@ -261,18 +280,23 @@ export const DeliveryRegister = () => {
                       Preferred Zone
                     </label>
                     <select
-                      value={formData.area}
-                      onChange={(e) =>
-                        setFormData({ ...formData, area: e.target.value })
-                      }
+                      value={useCustomArea ? '__custom__' : formData.area}
+                      onChange={(e) => {
+                        if (e.target.value === '__custom__') {
+                          setUseCustomArea(true);
+                        } else {
+                          setUseCustomArea(false);
+                          setFormData({ ...formData, area: e.target.value });
+                        }
+                      }}
                       className="w-full px-3 py-3 bg-gray-800 border border-gray-700 rounded-xl text-sm text-white outline-none"
                     >
-                      <option value="Central Zone">Central Zone</option>
-                      <option value="Sector 14">Sector 14</option>
-                      <option value="Cyber City">Cyber City</option>
-                      <option value="Green Park">Green Park</option>
-                      <option value="Dwarka">Dwarka</option>
-                      <option value="Rohini">Rohini</option>
+                      {availableZones.map((zone) => (
+                        <option key={zone} value={zone}>
+                          {zone}
+                        </option>
+                      ))}
+                      <option value="__custom__">+ Enter Custom Area / Pincode</option>
                     </select>
                   </div>
                   <div>
@@ -293,6 +317,22 @@ export const DeliveryRegister = () => {
                     </select>
                   </div>
                 </div>
+                {useCustomArea && (
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">
+                      Custom City / Area &amp; Pincode *
+                    </label>
+                    <input
+                      type="text"
+                      maxLength={80}
+                      placeholder="e.g. Gwalior (474011)"
+                      value={formData.customArea}
+                      onChange={(e) => setFormData({ ...formData, customArea: e.target.value })}
+                      className="w-full px-4 py-3 bg-gray-800 border border-green-500/60 rounded-xl focus:ring-2 focus:ring-green-500 outline-none text-white placeholder-gray-500 text-sm"
+                      required
+                    />
+                  </div>
+                )}
               </div>
             )}
 
@@ -376,7 +416,7 @@ export const DeliveryRegister = () => {
                   <div className="flex justify-between">
                     <span className="text-gray-400">Zone / Vehicle:</span>
                     <span className="font-bold text-white">
-                      {formData.area} • {formData.vehicle}
+                      {resolvedArea || 'Central Zone'} • {formData.vehicle}
                     </span>
                   </div>
                   <div className="flex justify-between">

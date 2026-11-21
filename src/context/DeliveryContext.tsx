@@ -267,7 +267,7 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       id: uid,
       uid,
       partnerCode,
-      name: (input.name || firebaseUser.displayName || 'Delivery Partner').trim().slice(0, 120),
+      name: ((input.name || firebaseUser.displayName || '').trim() || 'Delivery Partner').slice(0, 120),
       email: (firebaseUser.email || '').slice(0, 200),
       phone: cleanPhone,
       area: input.area.trim().slice(0, 80) || 'Central Zone',
@@ -505,16 +505,24 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const cleanUid = data.uid.trim().replace(/[^a-zA-Z0-9_-]/g, '');
     const docId = cleanUid || 'partner_' + Math.random().toString(36).slice(2, 9);
     const partnerCode = generatePartnerCode(deliveryMen.length);
+    const cleanName = data.name.trim().slice(0, 120);
+    if (!cleanName) {
+      throw new Error('Partner full name is required.');
+    }
+    const cleanPhone = data.phone.replace(/\D/g, '').slice(0, 15);
+    if (cleanPhone.length < 10) {
+      throw new Error('Please enter a valid 10-digit mobile number.');
+    }
 
     const newBoy: DeliveryPersonnel = {
       id: docId,
       uid: docId,
       partnerCode,
-      name: data.name.trim().slice(0, 120),
+      name: cleanName,
       email: data.email.trim().slice(0, 200),
-      phone: data.phone.replace(/\D/g, '').slice(0, 15),
-      area: data.area.trim().slice(0, 80),
-      vehicle: data.vehicle.trim().slice(0, 60),
+      phone: cleanPhone,
+      area: data.area.trim().slice(0, 80) || 'Central Zone',
+      vehicle: data.vehicle.trim().slice(0, 60) || 'Motorcycle',
       isOnline: data.isOnline,
       isApproved: data.isApproved,
       completedDeliveries: 0,
@@ -546,11 +554,35 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     id: string,
     updates: Partial<DeliveryPersonnel>
   ): Promise<void> => {
+    const sanitized: Record<string, unknown> = {
+      updatedAt: serverTimestamp()
+    };
+    if (typeof updates.name === 'string') {
+      const clean = updates.name.trim().slice(0, 120);
+      if (clean) sanitized.name = clean;
+    }
+    if (typeof updates.area === 'string') {
+      sanitized.area = updates.area.trim().slice(0, 80) || 'Central Zone';
+    }
+    if (typeof updates.vehicle === 'string') {
+      sanitized.vehicle = updates.vehicle.trim().slice(0, 60) || 'Motorcycle';
+    }
+    if (typeof updates.phone === 'string') {
+      const cleanPhone = updates.phone.replace(/\D/g, '').slice(0, 15);
+      if (cleanPhone.length >= 10) sanitized.phone = cleanPhone;
+    }
+    if (typeof updates.email === 'string') {
+      sanitized.email = updates.email.trim().slice(0, 200);
+    }
+    if (typeof updates.isOnline === 'boolean') {
+      sanitized.isOnline = updates.isOnline;
+    }
+    if (typeof updates.isApproved === 'boolean') {
+      sanitized.isApproved = updates.isApproved;
+    }
+
     try {
-      await updateDoc(doc(db, 'deliveryPartners', id), {
-        ...updates,
-        updatedAt: serverTimestamp()
-      });
+      await updateDoc(doc(db, 'deliveryPartners', id), sanitized);
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `deliveryPartners/${id}`);
     }

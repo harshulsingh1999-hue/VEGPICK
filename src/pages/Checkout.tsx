@@ -1,9 +1,28 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useStore } from '../context/StoreContext';
 import { useAuth } from '../context/AuthContext';
-import { formatCurrency } from '../lib/utils';
+import {
+  formatCurrency,
+  detectCardNetwork,
+  formatPaymentMethodLabel,
+  getAdminSettlementSummary,
+  luhnCheckCard
+} from '../lib/utils';
+import { Order } from '../lib/data';
 import { useNavigate } from 'react-router-dom';
-import { CreditCard, CheckCircle, Tag, AlertTriangle, X, ArrowLeft } from 'lucide-react';
+import {
+  CreditCard,
+  CheckCircle,
+  Tag,
+  AlertTriangle,
+  X,
+  ArrowLeft,
+  Smartphone,
+  Landmark,
+  Copy,
+  ShieldCheck,
+  ExternalLink
+} from 'lucide-react';
 import { format, addDays } from 'date-fns';
 import { useToast } from '../context/ToastContext';
 import { PhoneOtpAuthCard } from '../components/PhoneOtpAuthCard';
@@ -16,7 +35,15 @@ interface ApiSlotDay {
 }
 
 export const Checkout = () => {
-  const { cart, cartTotal, clearCart, coupons, appSettings, refreshCatalog } = useStore();
+  const {
+    cart,
+    cartTotal,
+    clearCart,
+    coupons,
+    appSettings,
+    refreshCatalog,
+    checkPincodeServiceability
+  } = useStore();
   const { user, firebaseUser, ensureCustomerProfile, updateProfile, placeOrder, addAddress } = useAuth();
   const { showToast } = useToast();
   const navigate = useNavigate();
@@ -37,7 +64,13 @@ export const Checkout = () => {
   const [slotDays, setSlotDays] = useState<ApiSlotDay[]>([]);
   const [selectedDate, setSelectedDate] = useState(0);
   const [selectedSlot, setSelectedSlot] = useState('');
-  const [paymentMethod, setPaymentMethod] = useState<'cod' | 'upi'>('cod');
+  const [paymentMethod, setPaymentMethod] = useState<Order['paymentMethod']>('upi');
+  const [upiTransactionRef, setUpiTransactionRef] = useState('');
+  const [bankTransferRef, setBankTransferRef] = useState('');
+  const [cardHolderName, setCardHolderName] = useState(user?.name || '');
+  const [cardNumber, setCardNumber] = useState('');
+  const [cardExpiry, setCardExpiry] = useState('');
+  const [cardCvv, setCardCvv] = useState('');
   const [coupon, setCoupon] = useState('');
   const [discount, setDiscount] = useState(0);
   const [placingOrder, setPlacingOrder] = useState(false);
@@ -103,7 +136,17 @@ export const Checkout = () => {
     };
   }, []);
 
-  const baseFee = appSettings?.baseDeliveryFee ?? 20;
+  const activeAddressObj =
+    user?.addresses?.find((a) => a.id === selectedAddress) || user?.addresses?.[0] || null;
+  const activeAreaCheck = checkPincodeServiceability(activeAddressObj?.zip || '');
+  const matchedArea = activeAreaCheck.matchedArea;
+
+  const baseFee =
+    typeof matchedArea?.deliveryFeeOverride === 'number'
+      ? matchedArea.deliveryFeeOverride
+      : appSettings?.baseDeliveryFee ?? 20;
+  const minAreaOrder =
+    typeof matchedArea?.minOrderOverride === 'number' ? matchedArea.minOrderOverride : 0;
   const freeThreshold = appSettings?.freeDeliveryThreshold ?? 100;
   const taxRate = appSettings?.taxRate ?? 0;
   const storeOpen = appSettings?.storeOpen ?? true;
@@ -118,6 +161,44 @@ export const Checkout = () => {
       '4:00 PM - 6:00 PM',
       '6:00 PM - 8:00 PM'
     ];
+
+  const acceptUpi = appSettings?.acceptUpi !== false;
+  const acceptDebitCard = appSettings?.acceptDebitCard !== false;
+  const acceptCreditCard = appSettings?.acceptCreditCard !== false;
+  const acceptBankTransfer = appSettings?.acceptBankTransfer !== false;
+  const acceptCod = appSettings?.acceptCod !== false;
+
+  const adminUpiId = (appSettings?.upiId || '').trim();
+  const adminUpiPayeeName = (appSettings?.upiPayeeName || appSettings?.bankAccountHolder || 'FreshVeggie Delivery').trim();
+  const adminBankHolder = (appSettings?.bankAccountHolder || '').trim();
+  const adminBankName = (appSettings?.bankName || '').trim();
+  const adminBankNumber = (appSettings?.bankAccountNumber || '').trim();
+  const adminBankBranch = (appSettings?.bankBranch || '').trim();
+  const adminBankIfsc = (appSettings?.bankIfscCode || '').trim().toUpperCase();
+  const hasBankConfigured = Boolean(adminBankNumber && adminBankIfsc);
+  const settlementTargetSummary = getAdminSettlementSummary(appSettings);
+
+  useEffect(() => {
+    const enabledList: Order['paymentMethod'][] = [];
+    if (acceptUpi) enabledList.push('upi');
+    if (acceptDebitCard) enabledList.push('debit_card');
+    if (acceptCreditCard) enabledList.push('credit_card');
+    if (acceptBankTransfer) enabledList.push('bank_transfer');
+    if (acceptCod) enabledList.push('cod');
+    if (enabledList.length > 0 && !enabledList.includes(paymentMethod)) {
+      setPaymentMethod(enabledList[0]);
+    }
+  }, [acceptUpi, acceptDebitCard, acceptCreditCard, acceptBankTransfer, acceptCod, paymentMethod]);
+
+  const copyPaymentField = async (value: string, label: string) => {
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      showToast(`${label} copied!`, 'success');
+    } catch {
+      showToast(`Unable to copy ${label}.`, 'error');
+    }
+  };
 
 
   const handleSavePhoneAndContinue = async (e: React.FormEvent) => {
@@ -145,6 +226,12 @@ export const Checkout = () => {
     setCoupon(c);
     const found = coupons.find((item) => item.code.toUpperCase() === c && item.isActive);
     if (found) {
+      const todayIso = new Date().toISOString().split('T')[0];
+      if (found.expiry && /^\d{4}-\d{2}-\d{2}$/.test(found.expiry) && found.expiry < todayIso) {
+        showToast(`Coupon ${found.code} expired on ${found.expiry}`, 'error');
+        setDiscount(0);
+        return;
+      }
       if (cartTotal < found.minOrder) {
         showToast(`Minimum order value for code ${found.code} is ₹${found.minOrder}`, 'error');
         setDiscount(0);
@@ -192,21 +279,110 @@ export const Checkout = () => {
       return;
     }
 
+    const areaValidation = checkPincodeServiceability(resolvedAddress.zip);
+    if (!areaValidation.serviceable) {
+      showToast(
+        areaValidation.reason || `Pincode ${resolvedAddress.zip} is outside approved local delivery areas.`,
+        'error'
+      );
+      setStep(2);
+      return;
+    }
+
+    if (minAreaOrder > 0 && cartTotal < minAreaOrder) {
+      showToast(
+        `Minimum order for ${matchedArea?.name || resolvedAddress.zip} is ${formatCurrency(minAreaOrder)}.`,
+        'error'
+      );
+      return;
+    }
+
+    // 0. Validate selected payment channel before creating order
+    const cleanCardDigits = cardNumber.replace(/\D/g, '');
+    let paymentReference = '';
+    let paymentChannelLabel = formatPaymentMethodLabel(paymentMethod);
+    let resolvedCardLast4 = '';
+    let resolvedCardNetwork = '';
+    let resolvedPaymentStatus: Order['paymentStatus'] = paymentMethod === 'cod' ? 'pending' : 'paid';
+
+    if (paymentMethod === 'upi') {
+      if (!adminUpiId && !hasBankConfigured) {
+        showToast('Merchant UPI ID is not configured yet. Please select another payment option.', 'error');
+        return;
+      }
+      const cleanUtr = upiTransactionRef.trim().slice(0, 100);
+      paymentReference = cleanUtr || `UPI-${Date.now().toString(36).toUpperCase()}`;
+      paymentChannelLabel = adminUpiId ? `UPI Direct (${adminUpiId})` : 'UPI Direct Payment';
+      resolvedPaymentStatus = cleanUtr ? 'paid' : 'pending';
+    } else if (paymentMethod === 'debit_card' || paymentMethod === 'credit_card') {
+      if (!cardHolderName.trim()) {
+        showToast('Please enter the cardholder name.', 'error');
+        return;
+      }
+      if (!luhnCheckCard(cleanCardDigits)) {
+        showToast('Please enter a valid Debit/Credit card number.', 'error');
+        return;
+      }
+      const expMatch = cardExpiry.trim().match(/^(\d{2})\/(\d{2})$/);
+      if (!expMatch) {
+        showToast('Please enter a valid card expiry in MM/YY format.', 'error');
+        return;
+      }
+      const expMonth = Number(expMatch[1]);
+      const expYear = 2000 + Number(expMatch[2]);
+      const nowDate = new Date();
+      if (
+        expMonth < 1 ||
+        expMonth > 12 ||
+        expYear < nowDate.getFullYear() ||
+        (expYear === nowDate.getFullYear() && expMonth < nowDate.getMonth() + 1)
+      ) {
+        showToast('Your card expiry date appears invalid or expired.', 'error');
+        return;
+      }
+      const cleanCvv = cardCvv.replace(/\D/g, '');
+      if (cleanCvv.length < 3 || cleanCvv.length > 4) {
+        showToast('Please enter a valid 3 or 4 digit CVV.', 'error');
+        return;
+      }
+      resolvedCardLast4 = cleanCardDigits.slice(-4);
+      resolvedCardNetwork = detectCardNetwork(cleanCardDigits);
+      paymentReference = `AUTH-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+      paymentChannelLabel = `${resolvedCardNetwork} ${
+        paymentMethod === 'debit_card' ? 'Debit' : 'Credit'
+      } •••• ${resolvedCardLast4}`;
+      resolvedPaymentStatus = 'paid';
+    } else if (paymentMethod === 'bank_transfer') {
+      if (!hasBankConfigured) {
+        showToast('Merchant bank account details are not configured yet.', 'error');
+        return;
+      }
+      const cleanBankRef = bankTransferRef.trim().slice(0, 100);
+      if (cleanBankRef.length < 6) {
+        showToast('Please transfer to the Admin Bank Account and enter your 6+ char UTR / Reference ID.', 'error');
+        return;
+      }
+      paymentReference = cleanBankRef;
+      paymentChannelLabel = `${adminBankName || 'Bank'} Transfer (IFSC ${adminBankIfsc})`;
+      resolvedPaymentStatus = 'paid';
+    }
+
     setPlacingOrder(true);
     try {
-      // 1. Verify item stock availability via Express backend
+      // 1. Verify item stock availability & approved local area via Express backend
       const stockRes = await apiFetch('/api/orders/verify-stock', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: cart })
+        body: JSON.stringify({ items: cart, pincode: resolvedAddress.zip })
       });
       if (!stockRes.ok) {
         const stockErr = (await stockRes.json().catch(() => ({}))) as {
           error?: string;
           staleCatalog?: boolean;
           storeClosed?: boolean;
+          areaRestricted?: boolean;
         };
-        if (stockErr.staleCatalog || stockErr.storeClosed) {
+        if (stockErr.staleCatalog || stockErr.storeClosed || stockErr.areaRestricted) {
           void refreshCatalog();
         }
         showToast(
@@ -218,8 +394,16 @@ export const Checkout = () => {
       }
 
       // 2. Verify server quote via Express backend
-      const activeCouponObj = coupons.find((item) => item.code.toUpperCase() === coupon && item.isActive);
+      const normalizedCouponInput = coupon.trim().toUpperCase();
+      const activeCouponObj = coupons.find(
+        (item) => item.code.toUpperCase() === normalizedCouponInput && item.isActive
+      );
+      let verifiedSubtotal = Math.round(cartTotal);
+      let verifiedTaxAmount = taxAmount;
+      let verifiedDeliveryFee = deliveryFee;
+      let verifiedDiscount = discount;
       let verifiedTotal = finalTotal;
+
       try {
         const quoteRes = await apiFetch('/api/orders/quote', {
           method: 'POST',
@@ -235,14 +419,25 @@ export const Checkout = () => {
           })
         });
         if (quoteRes.ok) {
-          const quoteData = (await quoteRes.json()) as { total?: number };
-          if (typeof quoteData.total === 'number') {
-            verifiedTotal = quoteData.total;
-          }
+          const quoteData = (await quoteRes.json()) as {
+            subtotal?: number;
+            taxAmount?: number;
+            deliveryFee?: number;
+            discount?: number;
+            total?: number;
+          };
+          if (typeof quoteData.subtotal === 'number') verifiedSubtotal = quoteData.subtotal;
+          if (typeof quoteData.taxAmount === 'number') verifiedTaxAmount = quoteData.taxAmount;
+          if (typeof quoteData.deliveryFee === 'number') verifiedDeliveryFee = quoteData.deliveryFee;
+          if (typeof quoteData.discount === 'number') verifiedDiscount = quoteData.discount;
+          if (typeof quoteData.total === 'number') verifiedTotal = quoteData.total;
         }
       } catch {
         // Continue with verified client calculation if offline
       }
+
+      const appliedCouponCode =
+        verifiedDiscount > 0 ? (activeCouponObj?.code || normalizedCouponInput).trim().toUpperCase() : '';
 
       const slotText = selectedSlot
         ? `${format(addDays(new Date(), selectedDate), 'EEE, MMM d')} - ${selectedSlot}`
@@ -251,14 +446,30 @@ export const Checkout = () => {
       orderPlacedRef.current = true;
       await placeOrder({
         items: [...cart],
+        subtotal: verifiedSubtotal,
+        taxRate,
+        taxAmount: verifiedTaxAmount,
+        deliveryFee: verifiedDeliveryFee,
+        discountAmount: verifiedDiscount,
+        couponCode: appliedCouponCode,
         total: verifiedTotal,
         deliverySlot: slotText,
         address: resolvedAddress,
         paymentMethod,
+        paymentStatus: resolvedPaymentStatus,
+        paymentReference,
+        paymentChannelLabel,
+        settlementTargetSummary,
+        cardLast4: resolvedCardLast4,
+        cardNetwork: resolvedCardNetwork,
         customerName: user.name,
         customerPhone: cleanPhone
       });
 
+      // Clear transient card input state immediately
+      setCardNumber('');
+      setCardExpiry('');
+      setCardCvv('');
       clearCart();
       navigate('/order-success');
     } catch {
@@ -381,21 +592,44 @@ export const Checkout = () => {
 
         {step === 2 && user && (
           <div className="space-y-3">
-            {user.addresses?.map((addr) => (
-              <label key={addr.id} className={`flex items-start gap-3 p-3 border rounded-lg cursor-pointer ${selectedAddress === addr.id ? 'border-green-500 bg-green-50' : 'border-gray-200'}`}>
-                <input
-                  type="radio"
-                  name="address"
-                  checked={selectedAddress === addr.id}
-                  onChange={() => setSelectedAddress(addr.id)}
-                  className="mt-1 text-green-600 focus:ring-green-500"
-                />
-                <div>
-                  <span className="font-medium block">{addr.label}</span>
-                  <p className="text-sm text-gray-600">{addr.street}, {addr.city}, {addr.zip}</p>
-                </div>
-              </label>
-            ))}
+            {user.addresses?.map((addr) => {
+              const addrStatus = checkPincodeServiceability(addr.zip);
+              return (
+                <label
+                  key={addr.id}
+                  className={`flex items-start gap-3 p-3 border rounded-lg cursor-pointer ${
+                    !addrStatus.serviceable
+                      ? 'border-red-200 bg-red-50/40'
+                      : selectedAddress === addr.id
+                      ? 'border-green-500 bg-green-50'
+                      : 'border-gray-200'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="address"
+                    checked={selectedAddress === addr.id}
+                    onChange={() => setSelectedAddress(addr.id)}
+                    className="mt-1 text-green-600 focus:ring-green-500"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="font-medium">{addr.label}</span>
+                      {!addrStatus.serviceable ? (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-red-100 text-red-700">
+                          Not Serviceable ({addr.zip})
+                        </span>
+                      ) : addrStatus.matchedArea ? (
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-green-100 text-green-700">
+                          {addrStatus.matchedArea.name} • ~{addrStatus.matchedArea.etaMinutes} min ETA
+                        </span>
+                      ) : null}
+                    </div>
+                    <p className="text-sm text-gray-600">{addr.street}, {addr.city}, {addr.zip}</p>
+                  </div>
+                </label>
+              );
+            })}
 
             {(!user.addresses || user.addresses.length === 0) && !showAddAddress && (
               <p className="text-sm text-amber-700 bg-amber-50 p-3 rounded-lg border border-amber-200">
@@ -492,6 +726,14 @@ export const Checkout = () => {
                 if (!validAddr) {
                   showToast('Please add a delivery address before continuing', 'error');
                   setShowAddAddress(true);
+                  return;
+                }
+                const check = checkPincodeServiceability(validAddr.zip);
+                if (!check.serviceable) {
+                  showToast(
+                    check.reason || `Delivery is restricted for pincode ${validAddr.zip}.`,
+                    'error'
+                  );
                   return;
                 }
                 setSelectedAddress(validAddr.id);
@@ -601,27 +843,357 @@ export const Checkout = () => {
 
         {step === 4 && (
           <div className="space-y-3">
-            <label className={`flex items-center gap-3 p-4 border rounded-lg cursor-pointer ${paymentMethod === 'upi' ? 'border-green-500 bg-green-50' : 'border-gray-200'}`}>
-              <input
-                type="radio"
-                name="payment"
-                checked={paymentMethod === 'upi'}
-                onChange={() => setPaymentMethod('upi')}
-              />
-              <CreditCard size={20} className="text-gray-600" />
-              <span className="font-medium">UPI / Online Payment</span>
-            </label>
+            {/* 1. UPI Direct to Admin Bank Account / UPI ID */}
+            {acceptUpi && (
+              <div className={`border rounded-xl transition ${paymentMethod === 'upi' ? 'border-green-500 bg-green-50/40' : 'border-gray-200'}`}>
+                <label className="flex items-center justify-between gap-3 p-4 cursor-pointer">
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="radio"
+                      name="payment"
+                      checked={paymentMethod === 'upi'}
+                      onChange={() => setPaymentMethod('upi')}
+                    />
+                    <Smartphone size={20} className="text-green-700" />
+                    <div>
+                      <span className="font-semibold text-sm block text-gray-900">UPI Direct Payment</span>
+                      <span className="text-[11px] text-gray-500">GPay, PhonePe, Paytm, BHIM directly to store UPI ID</span>
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-green-100 text-green-700">Instant</span>
+                </label>
 
-            <label className={`flex items-center gap-3 p-4 border rounded-lg cursor-pointer ${paymentMethod === 'cod' ? 'border-green-500 bg-green-50' : 'border-gray-200'}`}>
-              <input
-                type="radio"
-                name="payment"
-                checked={paymentMethod === 'cod'}
-                onChange={() => setPaymentMethod('cod')}
-              />
-              <span className="font-bold text-gray-600">₹</span>
-              <span className="font-medium">Cash on Delivery</span>
-            </label>
+                {paymentMethod === 'upi' && (
+                  <div className="px-4 pb-4 pt-1 border-t border-green-100 space-y-3 text-xs">
+                    {adminUpiId ? (
+                      <div className="bg-white p-3.5 rounded-xl border border-green-200 space-y-2.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <p className="text-[10px] font-bold uppercase text-gray-400">Admin Official UPI ID</p>
+                            <p className="font-mono font-bold text-sm text-gray-900">{adminUpiId}</p>
+                            <p className="text-[11px] text-gray-500">Payee: {adminUpiPayeeName}</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => void copyPaymentField(adminUpiId, 'UPI ID')}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold"
+                          >
+                            <Copy size={12} /> Copy
+                          </button>
+                        </div>
+
+                        {hasBankConfigured && (
+                          <p className="text-[11px] text-emerald-700 bg-emerald-50 px-2.5 py-1.5 rounded-lg">
+                            Settles directly into <strong>{adminBankName || 'Merchant Bank'}</strong> A/C ••••{adminBankNumber.slice(-4)} (IFSC {adminBankIfsc})
+                          </p>
+                        )}
+
+                        <a
+                          href={`upi://pay?pa=${encodeURIComponent(adminUpiId)}&pn=${encodeURIComponent(adminUpiPayeeName)}&am=${finalTotal}&cu=INR&tn=${encodeURIComponent('FreshVeggie Order')}`}
+                          className="w-full py-2.5 px-3 bg-green-600 hover:bg-green-700 text-white rounded-lg font-bold flex items-center justify-center gap-1.5 transition"
+                        >
+                          <ExternalLink size={14} /> Open UPI App &amp; Pay {formatCurrency(finalTotal)}
+                        </a>
+                      </div>
+                    ) : (
+                      <p className="text-amber-700 bg-amber-50 border border-amber-200 p-2.5 rounded-lg">
+                        Store Admin has not entered a UPI ID yet in Payment Management.
+                      </p>
+                    )}
+
+                    <div>
+                      <label className="block font-bold text-gray-700 mb-1">
+                        UPI Transaction / UTR Reference ID (Enter after paying, or leave blank to verify later)
+                      </label>
+                      <input
+                        type="text"
+                        value={upiTransactionRef}
+                        onChange={(e) => setUpiTransactionRef(e.target.value)}
+                        placeholder="e.g. 432512345678 (12-digit UTR)"
+                        className="w-full p-2.5 bg-white border border-gray-200 rounded-lg font-mono text-xs outline-none focus:ring-2 focus:ring-green-500"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* 2. Debit Card (Direct Settlement to Admin Bank Account) */}
+            {acceptDebitCard && (
+              <div className={`border rounded-xl transition ${paymentMethod === 'debit_card' ? 'border-green-500 bg-green-50/40' : 'border-gray-200'}`}>
+                <label className="flex items-center justify-between gap-3 p-4 cursor-pointer">
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="radio"
+                      name="payment"
+                      checked={paymentMethod === 'debit_card'}
+                      onChange={() => setPaymentMethod('debit_card')}
+                    />
+                    <CreditCard size={20} className="text-blue-700" />
+                    <div>
+                      <span className="font-semibold text-sm block text-gray-900">Debit Card</span>
+                      <span className="text-[11px] text-gray-500">Visa, Mastercard, RuPay • Direct bank settlement</span>
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-blue-100 text-blue-700">Debit</span>
+                </label>
+
+                {paymentMethod === 'debit_card' && (
+                  <div className="px-4 pb-4 pt-2 border-t border-green-100 space-y-2.5 text-xs">
+                    {hasBankConfigured && (
+                      <div className="bg-blue-50 border border-blue-100 text-blue-800 px-3 py-2 rounded-lg flex items-center gap-2">
+                        <ShieldCheck size={14} className="shrink-0" />
+                        <span>
+                          Direct settlement to <strong>{adminBankHolder || adminUpiPayeeName}</strong> ({adminBankName || 'Bank'} ••••{adminBankNumber.slice(-4)}, IFSC {adminBankIfsc})
+                        </span>
+                      </div>
+                    )}
+                    <input
+                      type="text"
+                      placeholder="Cardholder Name"
+                      value={cardHolderName}
+                      onChange={(e) => setCardHolderName(e.target.value)}
+                      className="w-full p-2.5 bg-white border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-green-500"
+                    />
+                    <div className="relative">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="Debit Card Number (16 digits)"
+                        value={cardNumber}
+                        onChange={(e) => {
+                          const digits = e.target.value.replace(/\D/g, '').slice(0, 16);
+                          setCardNumber(digits.replace(/(.{4})/g, '$1 ').trim());
+                        }}
+                        className="w-full p-2.5 bg-white border border-gray-200 rounded-lg font-mono outline-none focus:ring-2 focus:ring-green-500 pr-20"
+                      />
+                      {cardNumber.replace(/\D/g, '').length >= 4 && (
+                        <span className="absolute right-2.5 top-2.5 text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-gray-100 text-gray-700">
+                          {detectCardNetwork(cardNumber.replace(/\D/g, ''))}
+                        </span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="Expiry MM/YY"
+                        value={cardExpiry}
+                        onChange={(e) => {
+                          const d = e.target.value.replace(/\D/g, '').slice(0, 4);
+                          setCardExpiry(d.length > 2 ? `${d.slice(0, 2)}/${d.slice(2)}` : d);
+                        }}
+                        className="w-full p-2.5 bg-white border border-gray-200 rounded-lg font-mono outline-none focus:ring-2 focus:ring-green-500"
+                      />
+                      <input
+                        type="password"
+                        inputMode="numeric"
+                        placeholder="CVV"
+                        maxLength={4}
+                        value={cardCvv}
+                        onChange={(e) => setCardCvv(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                        className="w-full p-2.5 bg-white border border-gray-200 rounded-lg font-mono outline-none focus:ring-2 focus:ring-green-500"
+                      />
+                    </div>
+                    <p className="text-[10px] text-gray-500">
+                      Only masked last-4 digits &amp; authorization ref are recorded; full card number/CVV are never stored.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* 3. Credit Card (Direct Settlement to Admin Bank Account) */}
+            {acceptCreditCard && (
+              <div className={`border rounded-xl transition ${paymentMethod === 'credit_card' ? 'border-green-500 bg-green-50/40' : 'border-gray-200'}`}>
+                <label className="flex items-center justify-between gap-3 p-4 cursor-pointer">
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="radio"
+                      name="payment"
+                      checked={paymentMethod === 'credit_card'}
+                      onChange={() => setPaymentMethod('credit_card')}
+                    />
+                    <CreditCard size={20} className="text-purple-700" />
+                    <div>
+                      <span className="font-semibold text-sm block text-gray-900">Credit Card</span>
+                      <span className="text-[11px] text-gray-500">Visa, Mastercard, RuPay, Amex • Direct settlement</span>
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-purple-100 text-purple-700">Credit</span>
+                </label>
+
+                {paymentMethod === 'credit_card' && (
+                  <div className="px-4 pb-4 pt-2 border-t border-green-100 space-y-2.5 text-xs">
+                    {hasBankConfigured && (
+                      <div className="bg-purple-50 border border-purple-100 text-purple-800 px-3 py-2 rounded-lg flex items-center gap-2">
+                        <ShieldCheck size={14} className="shrink-0" />
+                        <span>
+                          Direct settlement to <strong>{adminBankHolder || adminUpiPayeeName}</strong> ({adminBankName || 'Bank'} ••••{adminBankNumber.slice(-4)}, IFSC {adminBankIfsc})
+                        </span>
+                      </div>
+                    )}
+                    <input
+                      type="text"
+                      placeholder="Cardholder Name"
+                      value={cardHolderName}
+                      onChange={(e) => setCardHolderName(e.target.value)}
+                      className="w-full p-2.5 bg-white border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-green-500"
+                    />
+                    <div className="relative">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="Credit Card Number"
+                        value={cardNumber}
+                        onChange={(e) => {
+                          const digits = e.target.value.replace(/\D/g, '').slice(0, 16);
+                          setCardNumber(digits.replace(/(.{4})/g, '$1 ').trim());
+                        }}
+                        className="w-full p-2.5 bg-white border border-gray-200 rounded-lg font-mono outline-none focus:ring-2 focus:ring-green-500 pr-20"
+                      />
+                      {cardNumber.replace(/\D/g, '').length >= 4 && (
+                        <span className="absolute right-2.5 top-2.5 text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-gray-100 text-gray-700">
+                          {detectCardNetwork(cardNumber.replace(/\D/g, ''))}
+                        </span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        placeholder="Expiry MM/YY"
+                        value={cardExpiry}
+                        onChange={(e) => {
+                          const d = e.target.value.replace(/\D/g, '').slice(0, 4);
+                          setCardExpiry(d.length > 2 ? `${d.slice(0, 2)}/${d.slice(2)}` : d);
+                        }}
+                        className="w-full p-2.5 bg-white border border-gray-200 rounded-lg font-mono outline-none focus:ring-2 focus:ring-green-500"
+                      />
+                      <input
+                        type="password"
+                        inputMode="numeric"
+                        placeholder="CVV"
+                        maxLength={4}
+                        value={cardCvv}
+                        onChange={(e) => setCardCvv(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                        className="w-full p-2.5 bg-white border border-gray-200 rounded-lg font-mono outline-none focus:ring-2 focus:ring-green-500"
+                      />
+                    </div>
+                    <p className="text-[10px] text-gray-500">
+                      Only masked last-4 digits &amp; authorization ref are recorded; full card number/CVV are never stored.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* 4. Direct Bank Account Transfer (Account Number, Branch, IFSC) */}
+            {acceptBankTransfer && (
+              <div className={`border rounded-xl transition ${paymentMethod === 'bank_transfer' ? 'border-green-500 bg-green-50/40' : 'border-gray-200'}`}>
+                <label className="flex items-center justify-between gap-3 p-4 cursor-pointer">
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="radio"
+                      name="payment"
+                      checked={paymentMethod === 'bank_transfer'}
+                      onChange={() => setPaymentMethod('bank_transfer')}
+                    />
+                    <Landmark size={20} className="text-indigo-700" />
+                    <div>
+                      <span className="font-semibold text-sm block text-gray-900">Direct Bank Account Transfer (IMPS / NEFT)</span>
+                      <span className="text-[11px] text-gray-500">Transfer directly using Account Number, Branch &amp; IFSC Code</span>
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-indigo-100 text-indigo-700">Bank</span>
+                </label>
+
+                {paymentMethod === 'bank_transfer' && (
+                  <div className="px-4 pb-4 pt-2 border-t border-green-100 space-y-3 text-xs">
+                    {hasBankConfigured ? (
+                      <div className="bg-white p-3.5 rounded-xl border border-indigo-200 space-y-2">
+                        <p className="text-[11px] font-bold uppercase text-indigo-700">
+                          Admin Receiving Bank Account Details
+                        </p>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <div>
+                            <span className="text-[10px] text-gray-400 block">Account Holder</span>
+                            <span className="font-bold text-gray-900">{adminBankHolder || adminUpiPayeeName}</span>
+                          </div>
+                          <div>
+                            <span className="text-[10px] text-gray-400 block">Bank &amp; Branch</span>
+                            <span className="font-bold text-gray-900">
+                              {adminBankName || 'Merchant Bank'}
+                              {adminBankBranch ? ` — ${adminBankBranch}` : ''}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between bg-gray-50 px-2.5 py-1.5 rounded-lg">
+                            <div>
+                              <span className="text-[10px] text-gray-400 block">Account Number</span>
+                              <span className="font-mono font-bold text-gray-900">{adminBankNumber}</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => void copyPaymentField(adminBankNumber, 'Account Number')}
+                              className="text-indigo-600 font-bold flex items-center gap-1"
+                            >
+                              <Copy size={12} /> Copy
+                            </button>
+                          </div>
+                          <div className="flex items-center justify-between bg-gray-50 px-2.5 py-1.5 rounded-lg">
+                            <div>
+                              <span className="text-[10px] text-gray-400 block">IFSC Code</span>
+                              <span className="font-mono font-bold text-gray-900">{adminBankIfsc}</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => void copyPaymentField(adminBankIfsc, 'IFSC Code')}
+                              className="text-indigo-600 font-bold flex items-center gap-1"
+                            >
+                              <Copy size={12} /> Copy
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-amber-700 bg-amber-50 border border-amber-200 p-2.5 rounded-lg">
+                        Store Admin has not configured bank account number &amp; IFSC details yet in Payment Management.
+                      </p>
+                    )}
+
+                    <div>
+                      <label className="block font-bold text-gray-700 mb-1">
+                        Bank Transfer UTR / IMPS Reference Number *
+                      </label>
+                      <input
+                        type="text"
+                        value={bankTransferRef}
+                        onChange={(e) => setBankTransferRef(e.target.value)}
+                        placeholder="Enter 6+ character UTR / Transaction Reference"
+                        className="w-full p-2.5 bg-white border border-gray-200 rounded-lg font-mono text-xs outline-none focus:ring-2 focus:ring-green-500"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* 5. Cash on Delivery */}
+            {acceptCod && (
+              <label className={`flex items-center gap-3 p-4 border rounded-xl cursor-pointer ${paymentMethod === 'cod' ? 'border-green-500 bg-green-50' : 'border-gray-200'}`}>
+                <input
+                  type="radio"
+                  name="payment"
+                  checked={paymentMethod === 'cod'}
+                  onChange={() => setPaymentMethod('cod')}
+                />
+                <span className="font-bold text-gray-700 w-5 text-center">₹</span>
+                <div>
+                  <span className="font-semibold text-sm block text-gray-900">Cash on Delivery</span>
+                  <span className="text-[11px] text-gray-500">Pay cash to your delivery partner upon arrival</span>
+                </div>
+              </label>
+            )}
 
             <div className="mt-6 border-t pt-4">
               {coupons.filter((c) => c.isActive).length > 0 && (

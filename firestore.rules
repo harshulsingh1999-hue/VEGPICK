@@ -96,7 +96,11 @@ service cloud.firestore {
         ]) &&
         data.keys().hasOnly([
           'taxRate', 'baseDeliveryFee', 'freeDeliveryThreshold',
-          'storeOpen', 'notificationsEnabled', 'catalogInitialized', 'updatedAt'
+          'storeOpen', 'notificationsEnabled', 'catalogInitialized',
+          'restrictToServiceAreas', 'upiId', 'upiPayeeName',
+          'bankAccountHolder', 'bankName', 'bankAccountNumber',
+          'bankBranch', 'bankIfscCode', 'acceptUpi', 'acceptDebitCard',
+          'acceptCreditCard', 'acceptBankTransfer', 'acceptCod', 'updatedAt'
         ]) &&
         data.taxRate is number && data.taxRate >= 0 && data.taxRate <= 50 &&
         data.baseDeliveryFee is number && data.baseDeliveryFee >= 0 && data.baseDeliveryFee <= 5000 &&
@@ -104,6 +108,45 @@ service cloud.firestore {
         data.storeOpen is bool &&
         data.notificationsEnabled is bool &&
         (!data.keys().hasAny(['catalogInitialized']) || data.catalogInitialized is bool) &&
+        (!data.keys().hasAny(['restrictToServiceAreas']) || data.restrictToServiceAreas is bool) &&
+        (!data.keys().hasAny(['upiId']) || isValidString(data.upiId, 0, 100)) &&
+        (!data.keys().hasAny(['upiPayeeName']) || isValidString(data.upiPayeeName, 0, 100)) &&
+        (!data.keys().hasAny(['bankAccountHolder']) || isValidString(data.bankAccountHolder, 0, 120)) &&
+        (!data.keys().hasAny(['bankName']) || isValidString(data.bankName, 0, 120)) &&
+        (!data.keys().hasAny(['bankAccountNumber']) || isValidString(data.bankAccountNumber, 0, 34)) &&
+        (!data.keys().hasAny(['bankBranch']) || isValidString(data.bankBranch, 0, 120)) &&
+        (!data.keys().hasAny(['bankIfscCode']) || isValidString(data.bankIfscCode, 0, 20)) &&
+        (!data.keys().hasAny(['acceptUpi']) || data.acceptUpi is bool) &&
+        (!data.keys().hasAny(['acceptDebitCard']) || data.acceptDebitCard is bool) &&
+        (!data.keys().hasAny(['acceptCreditCard']) || data.acceptCreditCard is bool) &&
+        (!data.keys().hasAny(['acceptBankTransfer']) || data.acceptBankTransfer is bool) &&
+        (!data.keys().hasAny(['acceptCod']) || data.acceptCod is bool) &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidServiceArea(data) {
+      return data.keys().hasAll([
+          'id', 'name', 'city', 'pincode', 'isActive',
+          'etaMinutes', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'name', 'city', 'pincode', 'isActive',
+          'deliveryFeeOverride', 'minOrderOverride', 'etaMinutes', 'notes',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidString(data.name, 1, 100) &&
+        isValidString(data.city, 1, 80) &&
+        data.pincode is string && data.pincode.size() >= 4 && data.pincode.size() <= 10 &&
+        data.pincode.matches('^[0-9]{4,10}$') &&
+        data.isActive is bool &&
+        (!data.keys().hasAny(['deliveryFeeOverride']) ||
+          (data.deliveryFeeOverride is number && data.deliveryFeeOverride >= 0 && data.deliveryFeeOverride <= 5000)) &&
+        (!data.keys().hasAny(['minOrderOverride']) ||
+          (data.minOrderOverride is number && data.minOrderOverride >= 0 && data.minOrderOverride <= 50000)) &&
+        data.etaMinutes is number && data.etaMinutes >= 5 && data.etaMinutes <= 1440 &&
+        (!data.keys().hasAny(['notes']) || isValidString(data.notes, 0, 240)) &&
+        data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
 
@@ -227,9 +270,11 @@ service cloud.firestore {
           'assignedToCode', 'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
-          'id', 'userId', 'customerName', 'customerPhone', 'items', 'total',
-          'status', 'date', 'deliverySlot', 'address', 'paymentMethod',
-          'paymentStatus', 'deliveryPin', 'assignedToUid', 'assignedToName',
+          'id', 'userId', 'customerName', 'customerPhone', 'items',
+          'subtotal', 'taxRate', 'taxAmount', 'deliveryFee', 'discountAmount', 'couponCode',
+          'total', 'status', 'date', 'deliverySlot', 'address', 'paymentMethod',
+          'paymentStatus', 'paymentReference', 'paymentChannelLabel', 'settlementTargetSummary',
+          'cardLast4', 'cardNetwork', 'deliveryPin', 'assignedToUid', 'assignedToName',
           'assignedToCode', 'failureReason', 'proofImageUrl', 'createdAt', 'updatedAt'
         ]) &&
         isValidId(data.id) &&
@@ -239,13 +284,24 @@ service cloud.firestore {
         data.customerPhone.matches('^[0-9]{10,15}$') &&
         data.items is list && data.items.size() >= 1 && data.items.size() <= 50 &&
         data.items[0] is map &&
+        (!data.keys().hasAny(['subtotal']) || (data.subtotal is number && data.subtotal >= 0 && data.subtotal <= 1000000)) &&
+        (!data.keys().hasAny(['taxRate']) || (data.taxRate is number && data.taxRate >= 0 && data.taxRate <= 50)) &&
+        (!data.keys().hasAny(['taxAmount']) || (data.taxAmount is number && data.taxAmount >= 0 && data.taxAmount <= 500000)) &&
+        (!data.keys().hasAny(['deliveryFee']) || (data.deliveryFee is number && data.deliveryFee >= 0 && data.deliveryFee <= 5000)) &&
+        (!data.keys().hasAny(['discountAmount']) || (data.discountAmount is number && data.discountAmount >= 0 && data.discountAmount <= 100000)) &&
+        (!data.keys().hasAny(['couponCode']) || isValidString(data.couponCode, 0, 32)) &&
         data.total is number && data.total >= 0 && data.total <= 1000000 &&
         data.status in ['placed', 'packed', 'out_for_delivery', 'delivered', 'cancelled'] &&
         isValidString(data.date, 4, 64) &&
         isValidString(data.deliverySlot, 1, 120) &&
         isValidAddress(data.address) &&
-        data.paymentMethod in ['cod', 'upi'] &&
+        data.paymentMethod in ['cod', 'upi', 'debit_card', 'credit_card', 'bank_transfer'] &&
         data.paymentStatus in ['pending', 'collected', 'paid'] &&
+        (!data.keys().hasAny(['paymentReference']) || isValidString(data.paymentReference, 0, 100)) &&
+        (!data.keys().hasAny(['paymentChannelLabel']) || isValidString(data.paymentChannelLabel, 0, 100)) &&
+        (!data.keys().hasAny(['settlementTargetSummary']) || isValidString(data.settlementTargetSummary, 0, 180)) &&
+        (!data.keys().hasAny(['cardLast4']) || (data.cardLast4 is string && data.cardLast4.size() <= 4 && data.cardLast4.matches('^$|^[0-9]{4}$'))) &&
+        (!data.keys().hasAny(['cardNetwork']) || isValidString(data.cardNetwork, 0, 32)) &&
         data.deliveryPin is string && data.deliveryPin.size() == 4 &&
         data.deliveryPin.matches('^[0-9]{4}$') &&
         isValidString(data.assignedToUid, 0, 128) &&
@@ -272,7 +328,7 @@ service cloud.firestore {
         isValidString(data.deliverySlot, 1, 120) &&
         data.itemCount is number && data.itemCount >= 1 && data.itemCount <= 50 &&
         data.total is number && data.total >= 0 && data.total <= 1000000 &&
-        data.paymentMethod in ['cod', 'upi'] &&
+        data.paymentMethod in ['cod', 'upi', 'debit_card', 'credit_card', 'bank_transfer'] &&
         data.status in ['placed', 'packed', 'out_for_delivery', 'delivered', 'cancelled'] &&
         isValidString(data.assignedToUid, 0, 128) &&
         data.createdAt is timestamp &&
@@ -696,6 +752,23 @@ service cloud.firestore {
         isAdmin() &&
         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'resolutionNotes', 'updatedAt']);
       allow delete: if isValidId(complaintId) && isAdmin();
+    }
+
+    // 13. Serviceable Local Areas & Pincodes
+    match /serviceAreas/{areaId} {
+      allow get: if isValidId(areaId);
+      allow list: if resource.data.isActive == true || isBootstrappedAdmin();
+      allow create: if isVerifiedUser() && isValidId(areaId) && isValidServiceArea(incoming()) &&
+        incoming().id == areaId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+      allow update: if isVerifiedUser() && isValidId(areaId) && isValidServiceArea(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+      allow delete: if isValidId(areaId) && isAdmin();
     }
   }
 }

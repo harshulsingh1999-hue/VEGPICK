@@ -48,6 +48,52 @@
         "catalogInitialized": {
           "type": "boolean"
         },
+        "restrictToServiceAreas": {
+          "type": "boolean"
+        },
+        "upiId": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "upiPayeeName": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "bankAccountHolder": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "bankName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "bankAccountNumber": {
+          "type": "string",
+          "maxLength": 34
+        },
+        "bankBranch": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "bankIfscCode": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "acceptUpi": {
+          "type": "boolean"
+        },
+        "acceptDebitCard": {
+          "type": "boolean"
+        },
+        "acceptCreditCard": {
+          "type": "boolean"
+        },
+        "acceptBankTransfer": {
+          "type": "boolean"
+        },
+        "acceptCod": {
+          "type": "boolean"
+        },
         "updatedAt": {
           "type": "string",
           "format": "date-time"
@@ -381,6 +427,25 @@
         "items": {
           "type": "array"
         },
+        "subtotal": {
+          "type": "number"
+        },
+        "taxRate": {
+          "type": "number"
+        },
+        "taxAmount": {
+          "type": "number"
+        },
+        "deliveryFee": {
+          "type": "number"
+        },
+        "discountAmount": {
+          "type": "number"
+        },
+        "couponCode": {
+          "type": "string",
+          "maxLength": 32
+        },
         "total": {
           "type": "number"
         },
@@ -401,11 +466,32 @@
         },
         "paymentMethod": {
           "type": "string",
-          "enum": ["cod", "upi"]
+          "enum": ["cod", "upi", "debit_card", "credit_card", "bank_transfer"]
         },
         "paymentStatus": {
           "type": "string",
           "enum": ["pending", "collected", "paid"]
+        },
+        "paymentReference": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "paymentChannelLabel": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "settlementTargetSummary": {
+          "type": "string",
+          "maxLength": 180
+        },
+        "cardLast4": {
+          "type": "string",
+          "pattern": "^$|^[0-9]{4}$",
+          "maxLength": 4
+        },
+        "cardNetwork": {
+          "type": "string",
+          "maxLength": 32
         },
         "deliveryPin": {
           "type": "string",
@@ -492,7 +578,7 @@
         },
         "paymentMethod": {
           "type": "string",
-          "enum": ["cod", "upi"]
+          "enum": ["cod", "upi", "debit_card", "credit_card", "bank_transfer"]
         },
         "status": {
           "type": "string",
@@ -716,6 +802,68 @@
         "note",
         "createdAt"
       ]
+    },
+    "ServiceArea": {
+      "title": "ServiceArea",
+      "description": "Admin-managed serviceable local area and pincode configuration.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "city": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "pincode": {
+          "type": "string",
+          "pattern": "^[0-9]{4,10}$",
+          "minLength": 4,
+          "maxLength": 10
+        },
+        "isActive": {
+          "type": "boolean"
+        },
+        "deliveryFeeOverride": {
+          "type": "number"
+        },
+        "minOrderOverride": {
+          "type": "number"
+        },
+        "etaMinutes": {
+          "type": "number"
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "city",
+        "pincode",
+        "isActive",
+        "etaMinutes",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -766,6 +914,10 @@
     "/complaints/{complaintId}": {
       "schema": { "$ref": "#/entities/Complaint" },
       "description": "Customer support tickets and admin resolutions."
+    },
+    "/serviceAreas/{areaId}": {
+      "schema": { "$ref": "#/entities/ServiceArea" },
+      "description": "Approved serviceable local areas and pincodes managed by Super Admin."
     }
   }
 }
