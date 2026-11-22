@@ -134,6 +134,10 @@
           "type": "string",
           "maxLength": 500
         },
+        "images": {
+          "type": "array",
+          "description": "Ordered gallery image URLs (1-8 items); index 0 is used as the product front image."
+        },
         "available": {
           "type": "boolean"
         },

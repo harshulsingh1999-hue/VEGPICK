@@ -179,4 +179,40 @@ export const luhnCheckCard = (digitsOnly: string): boolean => {
   return sum % 10 === 0;
 };
 
+export const sanitizeProductImages = (
+  rawImages?: unknown,
+  fallbackImage?: string
+): string[] => {
+  const seen = new Set<string>();
+  const result: string[] = [];
 
+  const pushUrl = (candidate: unknown) => {
+    if (typeof candidate !== "string") return;
+    const trimmed = candidate.trim().slice(0, 500);
+    if (!trimmed || seen.has(trimmed) || result.length >= 8) return;
+    seen.add(trimmed);
+    result.push(trimmed);
+  };
+
+  if (Array.isArray(rawImages)) {
+    rawImages.forEach(pushUrl);
+  }
+  if (result.length === 0 && fallbackImage) {
+    pushUrl(fallbackImage);
+  }
+  return result;
+};
+
+export const getProductImages = (
+  product?: { image?: string; images?: unknown } | null
+): string[] => {
+  if (!product) return [];
+  return sanitizeProductImages(product.images, product.image);
+};
+
+export const getProductFrontImage = (
+  product?: { image?: string; images?: unknown } | null
+): string => {
+  const list = getProductImages(product);
+  return list[0] || (typeof product?.image === "string" ? product.image.trim() : "");
+};

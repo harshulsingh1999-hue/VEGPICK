@@ -6,6 +6,7 @@ import { ShoppingBag, Truck, Shield, Smartphone, Download, Phone, X } from 'luci
 import { usePWAInstall } from '../hooks/usePWAInstall';
 import { useToast } from '../context/ToastContext';
 import { PhoneOtpAuthCard } from '../components/PhoneOtpAuthCard';
+import { AppLogo } from '../components/AppLogo';
 
 export const Welcome = () => {
   const { user, authReady, isAdmin } = useAuth();
@@ -38,9 +39,11 @@ export const Welcome = () => {
         </Link>
       )}
 
-      <div className="w-20 h-20 bg-white rounded-full flex items-center justify-center mb-6 shadow-xl">
-        <ShoppingBag size={42} className="text-green-600" />
-      </div>
+      <AppLogo
+        size={96}
+        roundedClassName="rounded-3xl"
+        className="mb-5 shadow-2xl ring-2 ring-white/30"
+      />
 
       <h1 className="text-4xl font-bold mb-2 text-center">FreshVeggie</h1>
       <p className="text-green-100 mb-6 text-center max-w-xs text-sm">

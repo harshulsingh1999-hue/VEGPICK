@@ -4,6 +4,7 @@ import { X, User, Truck, FileText, Shield, Phone, AlertCircle, Smartphone } from
 import { useAuth } from '../context/AuthContext';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 import { useToast } from '../context/ToastContext';
+import { AppLogo } from './AppLogo';
 
 interface SidebarProps {
   isOpen: boolean;
@@ -28,7 +29,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
       {/* Sidebar */}
       <div className={`fixed top-0 left-0 h-full w-64 bg-white z-50 transform transition-transform duration-300 ease-in-out shadow-xl ${isOpen ? 'translate-x-0' : '-translate-x-full'}`}>
         <div className="p-5 flex justify-between items-center border-b border-gray-100">
-          <h2 className="font-bold text-xl text-green-600">FreshVeggie</h2>
+          <div className="flex items-center gap-2.5">
+            <AppLogo size={32} roundedClassName="rounded-lg" className="shadow-xs" />
+            <h2 className="font-bold text-xl text-green-600">FreshVeggie</h2>
+          </div>
           <button onClick={onClose} className="p-1 rounded-full hover:bg-gray-100 text-gray-500">
             <X size={24} />
           </button>

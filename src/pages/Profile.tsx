@@ -20,10 +20,16 @@ export const Profile = () => {
   const [newCity, setNewCity] = useState('');
   const [newZip, setNewZip] = useState('');
 
+  const [profileInitError, setProfileInitError] = useState<string | null>(null);
+  const [retryingProfile, setRetryingProfile] = useState(false);
+
   useEffect(() => {
     if (authReady && firebaseUser && !user) {
-      ensureCustomerProfile().catch(() => {
-        // user profile auto-init handled gracefully
+      setProfileInitError(null);
+      ensureCustomerProfile().catch((err) => {
+        setProfileInitError(
+          err instanceof Error ? err.message : 'Unable to initialize your customer profile.'
+        );
       });
     }
   }, [authReady, firebaseUser, user, ensureCustomerProfile]);
@@ -34,11 +40,54 @@ export const Profile = () => {
     navigate('/home');
   };
 
-  if (!authReady || (firebaseUser && !user)) {
+  if (!authReady || (firebaseUser && !user && !profileInitError)) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[70vh] gap-3">
         <div className="w-8 h-8 border-4 border-green-600 border-t-transparent rounded-full animate-spin" />
         <p className="text-xs text-gray-500">Loading your account...</p>
+      </div>
+    );
+  }
+
+  if (firebaseUser && !user && profileInitError) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[70vh] px-4 text-center max-w-sm mx-auto space-y-4">
+        <div className="w-14 h-14 bg-red-50 text-red-600 rounded-full flex items-center justify-center">
+          <User size={28} />
+        </div>
+        <div>
+          <h2 className="text-lg font-bold text-gray-900">Account Setup Interrupted</h2>
+          <p className="text-xs text-gray-500 mt-1">{profileInitError}</p>
+        </div>
+        <div className="flex gap-2 w-full">
+          <button
+            type="button"
+            disabled={retryingProfile}
+            onClick={async () => {
+              setRetryingProfile(true);
+              setProfileInitError(null);
+              try {
+                await ensureCustomerProfile();
+              } catch (err) {
+                setProfileInitError(
+                  err instanceof Error ? err.message : 'Retry failed. Please check connection.'
+                );
+              } finally {
+                setRetryingProfile(false);
+              }
+            }}
+            className="flex-1 bg-green-600 text-white py-2.5 rounded-xl text-xs font-bold hover:bg-green-700 disabled:opacity-50"
+          >
+            {retryingProfile ? 'Retrying...' : 'Retry'}
+          </button>
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="flex-1 bg-gray-100 text-gray-700 py-2.5 rounded-xl text-xs font-bold hover:bg-gray-200"
+          >
+            Sign Out
+          </button>
+        </div>
       </div>
     );
   }

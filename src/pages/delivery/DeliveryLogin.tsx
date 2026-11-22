@@ -4,7 +4,6 @@ import { useDelivery } from '../../context/DeliveryContext';
 import { useToast } from '../../context/ToastContext';
 import { useNavigate, Link } from 'react-router-dom';
 import {
-  Truck,
   ArrowLeft,
   Clock,
   LogOut,
@@ -13,6 +12,7 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { PhoneOtpAuthCard } from '../../components/PhoneOtpAuthCard';
+import { AppLogo } from '../../components/AppLogo';
 
 export const DeliveryLogin = () => {
   const { firebaseUser, authReady, logout } = useAuth();
@@ -47,9 +47,11 @@ export const DeliveryLogin = () => {
         <span className="text-sm font-medium">Back to Home</span>
       </Link>
 
-      <div className="w-20 h-20 bg-green-500 rounded-full flex items-center justify-center mb-5 shadow-lg shadow-green-500/40 mt-12 sm:mt-0">
-        <Truck size={40} className="text-white" />
-      </div>
+      <AppLogo
+        size={80}
+        roundedClassName="rounded-2xl"
+        className="mb-5 shadow-xl ring-2 ring-white/20 mt-12 sm:mt-0"
+      />
 
       <h1 className="text-3xl font-bold mb-2">Delivery Partner</h1>
       <p className="text-gray-400 mb-6 text-center max-w-xs text-sm">

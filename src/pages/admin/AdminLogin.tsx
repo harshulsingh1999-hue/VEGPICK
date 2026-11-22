@@ -1,9 +1,10 @@
 import React, { useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { Shield, ArrowLeft, ShieldAlert, LogOut, Copy } from 'lucide-react';
+import { ArrowLeft, ShieldAlert, LogOut, Copy } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { PhoneOtpAuthCard } from '../../components/PhoneOtpAuthCard';
+import { AppLogo } from '../../components/AppLogo';
 
 export const AdminLogin = () => {
   const navigate = useNavigate();
@@ -35,9 +36,11 @@ export const AdminLogin = () => {
         <span className="text-sm font-medium">Back to Home</span>
       </Link>
 
-      <div className="w-20 h-20 bg-blue-500 rounded-full flex items-center justify-center mb-5 shadow-lg shadow-blue-500/40 mt-12 sm:mt-0">
-        <Shield size={40} className="text-white" />
-      </div>
+      <AppLogo
+        size={80}
+        roundedClassName="rounded-2xl"
+        className="mb-5 shadow-xl ring-2 ring-white/20 mt-12 sm:mt-0"
+      />
 
       <h1 className="text-3xl font-bold mb-2">Admin Control</h1>
       <p className="text-gray-400 mb-6 text-center text-sm max-w-xs">

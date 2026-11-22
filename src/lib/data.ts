@@ -4,6 +4,7 @@ export interface Product {
   category: 'Leafy Greens' | 'Root Vegetables' | 'Fruits' | 'Herbs' | 'Exotic' | string;
   pricePerKg: number;
   image: string;
+  images?: string[];
   available: boolean;
   description: string;
   rating: number;

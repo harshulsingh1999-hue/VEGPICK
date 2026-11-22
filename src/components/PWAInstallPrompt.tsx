@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { Download, X, Smartphone, Share } from 'lucide-react';
+import { Download, X, Share } from 'lucide-react';
 import { useLocation } from 'react-router-dom';
 import { usePWAInstall } from '../hooks/usePWAInstall';
+import { AppLogo } from './AppLogo';
 
 export const PWAInstallPrompt: React.FC = () => {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
@@ -32,9 +33,11 @@ export const PWAInstallPrompt: React.FC = () => {
       {/* Top Banner on Mobile */}
       <div className="bg-gradient-to-r from-emerald-600 to-green-700 text-white px-4 py-2.5 shadow-md flex items-center justify-between gap-3 text-xs sm:text-sm">
         <div className="flex items-center gap-2.5 flex-1 min-w-0">
-          <div className="w-8 h-8 rounded-lg bg-white/20 flex items-center justify-center shrink-0">
-            <Smartphone className="w-5 h-5 text-white" />
-          </div>
+          <AppLogo
+            size={36}
+            roundedClassName="rounded-lg"
+            className="shadow-xs ring-1 ring-white/25"
+          />
           <div className="truncate">
             <p className="font-bold truncate">
               {isIOS ? 'Install FreshVeggie iOS App' : 'Install FreshVeggie Mobile App'}
@@ -69,9 +72,7 @@ export const PWAInstallPrompt: React.FC = () => {
           <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl text-gray-900 animate-in fade-in zoom-in-95 duration-150">
             <div className="flex justify-between items-start mb-4">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-green-100 flex items-center justify-center text-green-600">
-                  <Smartphone size={24} />
-                </div>
+                <AppLogo size={44} roundedClassName="rounded-xl" className="shadow-xs" />
                 <div>
                   <h3 className="font-bold text-base">
                     {isIOS ? 'Install on iPhone / iPad' : 'Install on Android'}

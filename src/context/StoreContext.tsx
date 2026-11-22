@@ -27,6 +27,7 @@ import {
   DEFAULT_APP_SETTINGS
 } from '../lib/data';
 import { STARTER_COUPONS, STARTER_PRODUCTS } from '../lib/catalogDefaults';
+import { getProductFrontImage, sanitizeProductImages } from '../lib/utils';
 import { useAuth } from './AuthContext';
 
 interface StoreContextType {
@@ -452,12 +453,15 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // Admin Product CRUD
   const addProduct = async (productData: Omit<Product, 'id'>): Promise<Product> => {
     const id = 'prod_' + Math.random().toString(36).slice(2, 9);
+    const normalizedImages = sanitizeProductImages(productData.images, productData.image);
+    const frontImage = normalizedImages[0] || productData.image.trim().slice(0, 500);
     const newProduct: Product = {
       id,
       name: productData.name.trim().slice(0, 120),
       category: productData.category,
       pricePerKg: Math.max(0, Number(productData.pricePerKg) || 0),
-      image: productData.image.trim().slice(0, 500),
+      image: frontImage,
+      images: normalizedImages.length > 0 ? normalizedImages : [frontImage],
       available: Boolean(productData.available),
       description: productData.description.trim().slice(0, 1000),
       rating: Number(productData.rating) || 4.5,
@@ -482,12 +486,22 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const updateProduct = async (id: string, updates: Partial<Product>): Promise<void> => {
     const existing = products.find((p) => p.id === id);
     if (!existing) return;
+    const rawGallery =
+      updates.images !== undefined
+        ? sanitizeProductImages(updates.images, updates.image ?? existing.image)
+        : updates.image !== undefined
+        ? sanitizeProductImages([updates.image, ...(existing.images || []).filter((u) => u !== updates.image)], updates.image)
+        : sanitizeProductImages(existing.images, existing.image);
+    const frontImage = rawGallery[0] || (updates.image ?? existing.image).trim().slice(0, 500);
+    const normalizedImages = rawGallery.length > 0 ? rawGallery : [frontImage];
+
     const updatedProduct: Product = {
       ...existing,
       name: (updates.name ?? existing.name).trim().slice(0, 120),
       category: updates.category ?? existing.category,
       pricePerKg: Math.max(0, Number(updates.pricePerKg ?? existing.pricePerKg)),
-      image: (updates.image ?? existing.image).trim().slice(0, 500),
+      image: frontImage,
+      images: normalizedImages,
       available: updates.available ?? existing.available,
       description: (updates.description ?? existing.description).trim().slice(0, 1000),
       rating: updates.rating ?? existing.rating,
@@ -499,6 +513,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         category: updatedProduct.category,
         pricePerKg: updatedProduct.pricePerKg,
         image: updatedProduct.image,
+        images: normalizedImages,
         available: updatedProduct.available,
         description: updatedProduct.description,
         rating: updatedProduct.rating,
@@ -981,7 +996,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         if (idx >= 0) {
           next[idx] = { ...next[idx], quantity: next[idx].quantity + qty };
         } else {
-          next.push({ ...entry.product, selectedWeight: entry.weight, quantity: qty });
+          next.push({
+            ...entry.product,
+            image: getProductFrontImage(entry.product),
+            selectedWeight: entry.weight,
+            quantity: qty
+          });
         }
       }
       persistCart(next);

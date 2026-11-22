@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useStore } from '../context/StoreContext';
 import { useToast } from '../context/ToastContext';
-import { formatCurrency } from '../lib/utils';
+import { formatCurrency, getProductFrontImage } from '../lib/utils';
 import { Package, ChevronRight, ChevronDown, Clock, MapPin, CheckCircle, Circle, RefreshCw, XCircle, Truck, ArrowRight, KeyRound } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { PhoneOtpAuthCard } from '../components/PhoneOtpAuthCard';
@@ -15,7 +15,7 @@ const STEPS = [
 ];
 
 export const Orders = () => {
-  const { orders, user, firebaseUser, authReady, ensureCustomerProfile, updateOrderStatus } = useAuth();
+  const { orders, user, firebaseUser, authReady, ensureCustomerProfile, updateOrderStatus, logout } = useAuth();
   const { addItemsToCart } = useStore();
   const { showToast } = useToast();
   const navigate = useNavigate();
@@ -23,19 +23,63 @@ export const Orders = () => {
   const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
   const [expandedOrderId, setExpandedOrderId] = useState<string | null>(null);
   const [cancellingOrderId, setCancellingOrderId] = useState<string | null>(null);
+  const [profileInitError, setProfileInitError] = useState<string | null>(null);
+  const [retryingProfile, setRetryingProfile] = useState(false);
 
   useEffect(() => {
     if (authReady && firebaseUser && !user) {
-      ensureCustomerProfile().catch(() => {
-        // ignore if profile initializes cleanly on next snapshot
+      setProfileInitError(null);
+      ensureCustomerProfile().catch((err) => {
+        setProfileInitError(
+          err instanceof Error ? err.message : 'Unable to load your customer profile.'
+        );
       });
     }
   }, [authReady, firebaseUser, user, ensureCustomerProfile]);
 
-  if (!authReady || (firebaseUser && !user)) {
+  if (!authReady || (firebaseUser && !user && !profileInitError)) {
     return (
       <div className="min-h-[70vh] flex items-center justify-center">
         <div className="w-8 h-8 border-4 border-green-600 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (firebaseUser && !user && profileInitError) {
+    return (
+      <div className="min-h-[70vh] flex flex-col items-center justify-center px-4 text-center max-w-sm mx-auto space-y-4">
+        <Package size={36} className="text-red-500" />
+        <div>
+          <h2 className="text-lg font-bold text-gray-900">Unable to Load Account</h2>
+          <p className="text-xs text-gray-500 mt-1">{profileInitError}</p>
+        </div>
+        <div className="flex gap-2 w-full">
+          <button
+            type="button"
+            disabled={retryingProfile}
+            onClick={async () => {
+              setRetryingProfile(true);
+              setProfileInitError(null);
+              try {
+                await ensureCustomerProfile();
+              } catch (err) {
+                setProfileInitError(err instanceof Error ? err.message : 'Retry failed.');
+              } finally {
+                setRetryingProfile(false);
+              }
+            }}
+            className="flex-1 bg-green-600 text-white py-2.5 rounded-xl text-xs font-bold hover:bg-green-700 disabled:opacity-50"
+          >
+            {retryingProfile ? 'Retrying...' : 'Retry'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void logout()}
+            className="flex-1 bg-gray-100 text-gray-700 py-2.5 rounded-xl text-xs font-bold hover:bg-gray-200"
+          >
+            Sign Out
+          </button>
+        </div>
       </div>
     );
   }
@@ -183,8 +227,9 @@ export const Orders = () => {
                       {order.items.slice(0, 3).map((item, i) => (
                         <img
                           key={i}
-                          src={item.image}
+                          src={getProductFrontImage(item)}
                           alt={item.name}
+                          referrerPolicy="no-referrer"
                           className="w-11 h-11 rounded-lg object-cover bg-gray-50 border border-gray-100"
                         />
                       ))}
@@ -280,7 +325,7 @@ export const Orders = () => {
                       <div className="space-y-2">
                         {order.items.map((item, i) => (
                           <div key={i} className="flex items-center gap-3 bg-white p-2.5 rounded-xl border border-gray-100">
-                            <img src={item.image} alt={item.name} className="w-10 h-10 rounded-lg object-cover bg-gray-50" />
+                            <img src={getProductFrontImage(item)} alt={item.name} referrerPolicy="no-referrer" className="w-10 h-10 rounded-lg object-cover bg-gray-50" />
                             <div className="flex-1">
                               <p className="text-xs font-bold text-gray-800">{item.name}</p>
                               <p className="text-[11px] text-gray-500">{item.selectedWeight}g × {item.quantity}</p>

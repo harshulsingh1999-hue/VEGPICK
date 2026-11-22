@@ -5,7 +5,8 @@ import {
   CreditCard, Tag, BarChart3, MessageSquare, Settings, LogOut, 
   Menu, X, Shield, Plus, Search, Edit2, Trash2, Check, CheckCircle2,
   AlertTriangle, Filter, Eye, Phone, MapPin, IndianRupee, ArrowUpRight, Sprout,
-  Download, Upload, Monitor, Camera, Database, Server, Calendar, Clock, Landmark, Smartphone
+  Download, Upload, Monitor, Camera, Database, Server, Calendar, Clock, Landmark, Smartphone,
+  ChevronLeft, ChevronRight
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { useAuth } from '../../context/AuthContext';
@@ -16,7 +17,10 @@ import {
   formatPaymentMethodLabel,
   getAdminSettlementSummary,
   getOrderBillingBreakdown,
-  isOnlinePaymentMethod
+  getProductFrontImage,
+  getProductImages,
+  isOnlinePaymentMethod,
+  sanitizeProductImages
 } from '../../lib/utils';
 import { CATEGORIES, Product, Coupon, DeliveryPersonnel, Order } from '../../lib/data';
 import { uploadCompressedMedia } from '../../lib/imageUtils';
@@ -25,6 +29,7 @@ import { useToast } from '../../context/ToastContext';
 import { AreaPincodeControlCenter } from '../../components/admin/AreaPincodeControlCenter';
 import { DatabaseControlCenter } from '../../components/admin/DatabaseControlCenter';
 import { ServerApiControlCenter } from '../../components/admin/ServerApiControlCenter';
+import { AppLogo } from '../../components/AppLogo';
 
 const SLOT_TIME_WINDOWS = [
   '6:00 AM - 8:00 AM',
@@ -236,11 +241,22 @@ export const AdminDashboard = () => {
     category: 'Root Vegetables',
     pricePerKg: 40,
     image: 'https://images.unsplash.com/photo-1592924357228-91a4daadcfea?auto=format&fit=crop&q=80&w=600',
+    images: ['https://images.unsplash.com/photo-1592924357228-91a4daadcfea?auto=format&fit=crop&q=80&w=600'] as string[],
     description: '',
     available: true
   });
+  const [newProductImageUrl, setNewProductImageUrl] = useState('');
   const [productSearch, setProductSearch] = useState('');
   const [productCategoryFilter, setProductCategoryFilter] = useState('All');
+
+  const syncProductGallery = (nextList: string[]) => {
+    const cleaned = sanitizeProductImages(nextList, nextList[0]);
+    setProductForm((prev) => ({
+      ...prev,
+      images: cleaned,
+      image: cleaned[0] || ''
+    }));
+  };
 
   // Customer state & modal
   const [customerSearch, setCustomerSearch] = useState('');
@@ -416,15 +432,18 @@ export const AdminDashboard = () => {
               <div className="flex gap-2">
                 <button
                   onClick={() => {
+                    const defaultImg = 'https://images.unsplash.com/photo-1592924357228-91a4daadcfea?auto=format&fit=crop&q=80&w=600';
                     setEditingProduct(null);
                     setProductForm({
                       name: '',
                       category: 'Root Vegetables',
                       pricePerKg: 40,
-                      image: 'https://images.unsplash.com/photo-1592924357228-91a4daadcfea?auto=format&fit=crop&q=80&w=600',
+                      image: defaultImg,
+                      images: [defaultImg],
                       description: 'Fresh farm harvested produce',
                       available: true
                     });
+                    setNewProductImageUrl('');
                     setShowProductModal(true);
                   }}
                   className="bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-sm transition"
@@ -1409,15 +1428,18 @@ export const AdminDashboard = () => {
                 )}
                 <button
                   onClick={() => {
+                    const defaultImg = 'https://images.unsplash.com/photo-1598170845058-32b9d6a5da37?auto=format&fit=crop&q=80&w=600';
                     setEditingProduct(null);
                     setProductForm({
                       name: '',
                       category: 'Root Vegetables',
                       pricePerKg: 50,
-                      image: 'https://images.unsplash.com/photo-1598170845058-32b9d6a5da37?auto=format&fit=crop&q=80&w=600',
+                      image: defaultImg,
+                      images: [defaultImg],
                       description: 'Fresh organic produce',
                       available: true
                     });
+                    setNewProductImageUrl('');
                     setShowProductModal(true);
                   }}
                   className="bg-green-600 hover:bg-green-700 text-white px-4 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2 shadow-sm transition"
@@ -1453,13 +1475,21 @@ export const AdminDashboard = () => {
 
             {/* Products Grid */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-              {filteredProductsList.map(prod => (
+              {filteredProductsList.map(prod => {
+                const prodImages = getProductImages(prod);
+                const frontImg = prodImages[0] || getProductFrontImage(prod);
+                return (
                 <div key={prod.id} className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden flex flex-col justify-between">
                   <div className="relative h-40 bg-gray-100">
-                    <img src={prod.image} alt={prod.name} className="w-full h-full object-cover" />
+                    <img src={frontImg} alt={prod.name} referrerPolicy="no-referrer" className="w-full h-full object-cover" />
                     <span className="absolute top-2 left-2 bg-white/90 backdrop-blur-xs text-xs font-bold px-2 py-0.5 rounded-md text-gray-700 shadow-xs">
                       {prod.category}
                     </span>
+                    {prodImages.length > 1 && (
+                      <span className="absolute bottom-2 left-2 bg-black/65 text-white text-[10px] font-semibold px-2 py-0.5 rounded-md tabular-nums">
+                        {prodImages.length} photos · Front #1
+                      </span>
+                    )}
                     <button
                       onClick={async () => {
                         try {
@@ -1497,15 +1527,19 @@ export const AdminDashboard = () => {
                       <div className="flex gap-2">
                         <button
                           onClick={() => {
+                            const gallery = getProductImages(prod);
+                            const primaryImg = gallery[0] || getProductFrontImage(prod);
                             setEditingProduct(prod);
                             setProductForm({
                               name: prod.name,
                               category: prod.category,
                               pricePerKg: prod.pricePerKg,
-                              image: prod.image,
+                              image: primaryImg,
+                              images: gallery.length > 0 ? gallery : primaryImg ? [primaryImg] : [],
                               description: prod.description,
                               available: prod.available
                             });
+                            setNewProductImageUrl('');
                             setShowProductModal(true);
                           }}
                           className="p-2 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition"
@@ -1531,7 +1565,8 @@ export const AdminDashboard = () => {
                     </div>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         );
@@ -2139,7 +2174,7 @@ export const AdminDashboard = () => {
                         <span className="w-6 h-6 rounded-full bg-green-100 text-green-700 font-bold text-xs flex items-center justify-center">
                           {i + 1}
                         </span>
-                        <img src={entry.product.image} alt={entry.product.name} className="w-10 h-10 rounded-lg object-cover" />
+                        <img src={getProductFrontImage(entry.product)} alt={entry.product.name} referrerPolicy="no-referrer" className="w-10 h-10 rounded-lg object-cover" />
                         <div>
                           <p className="font-bold text-gray-800 text-sm">{entry.product.name}</p>
                           <p className="text-xs text-gray-400">{entry.product.category} • {formatCurrency(entry.product.pricePerKg)}/kg</p>
@@ -2158,7 +2193,7 @@ export const AdminDashboard = () => {
                         <span className="w-6 h-6 rounded-full bg-green-100 text-green-700 font-bold text-xs flex items-center justify-center">
                           {i + 1}
                         </span>
-                        <img src={p.image} alt={p.name} className="w-10 h-10 rounded-lg object-cover" />
+                        <img src={getProductFrontImage(p)} alt={p.name} referrerPolicy="no-referrer" className="w-10 h-10 rounded-lg object-cover" />
                         <div>
                           <p className="font-bold text-gray-800 text-sm">{p.name}</p>
                           <p className="text-xs text-gray-400">{p.category} • {formatCurrency(p.pricePerKg)}/kg</p>
@@ -2476,9 +2511,7 @@ export const AdminDashboard = () => {
       `}>
         <div className="p-6 flex items-center justify-between border-b border-gray-800">
           <h1 className="text-xl font-bold text-white flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center">
-              <Shield size={18} className="text-white" />
-            </div>
+            <AppLogo size={34} roundedClassName="rounded-lg" className="shadow-xs" />
             Admin Control
           </h1>
           <button onClick={() => setIsSidebarOpen(false)} className="lg:hidden text-gray-400 hover:text-white">
@@ -2568,7 +2601,7 @@ export const AdminDashboard = () => {
       {/* ----------------------------------------------------------------- */}
       {showProductModal && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 p-6 space-y-4">
+          <div className="bg-white rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl animate-in zoom-in-95 p-6 space-y-4">
             <div className="flex justify-between items-center border-b pb-3">
               <h3 className="font-bold text-lg text-gray-800">
                 {editingProduct ? 'Edit Vegetable' : 'Add New Vegetable'}
@@ -2581,13 +2614,23 @@ export const AdminDashboard = () => {
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
+                const finalImages = sanitizeProductImages(productForm.images, productForm.image);
+                if (finalImages.length === 0) {
+                  showToast('Please provide at least one front product image.', 'error');
+                  return;
+                }
+                const payload = {
+                  ...productForm,
+                  image: finalImages[0],
+                  images: finalImages
+                };
                 try {
                   if (editingProduct) {
-                    await updateProduct(editingProduct.id, productForm);
+                    await updateProduct(editingProduct.id, payload);
                     showToast(`Updated ${productForm.name}`, 'success');
                   } else {
                     await addProduct({
-                      ...productForm,
+                      ...payload,
                       rating: 4.8,
                       reviews: 1
                     });
@@ -2640,46 +2683,223 @@ export const AdminDashboard = () => {
                 </div>
               </div>
 
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="block text-xs font-bold text-gray-600">Product Image (URL or &lt;200KB Upload)</label>
-                  <label className="text-[11px] font-bold text-blue-600 hover:underline cursor-pointer flex items-center gap-1">
-                    <Upload size={12} />
-                    {uploadingProductImg ? 'Compressing...' : 'Upload Photo'}
-                    <input
-                      type="file"
-                      accept="image/*"
-                      disabled={uploadingProductImg}
-                      onChange={async (e) => {
-                        const file = e.target.files?.[0];
-                        if (!file) return;
-                        setUploadingProductImg(true);
-                        try {
-                          const res = await uploadCompressedMedia(file, 'product');
-                          setProductForm((prev) => ({ ...prev, image: res.url }));
-                          showToast(
-                            `Compressed to ${Math.max(1, Math.round(res.sizeBytes / 1024))} KB WebP!`,
-                            'success'
-                          );
-                        } catch (err) {
-                          const msg = err instanceof Error ? err.message : 'Image upload failed';
-                          showToast(msg, 'error');
-                        } finally {
-                          setUploadingProductImg(false);
-                        }
-                      }}
-                      className="hidden"
-                    />
-                  </label>
-                </div>
-                <input
-                  type="text"
-                  required
-                  value={productForm.image}
-                  onChange={e => setProductForm({ ...productForm, image: e.target.value })}
-                  className="w-full p-2.5 border rounded-xl outline-none text-xs"
-                />
-              </div>
+              {/* Multi-Image Gallery Manager (Image #1 is always used as Front Image) */}
+              {(() => {
+                const galleryList = sanitizeProductImages(productForm.images, productForm.image);
+                const handleAddExtraUrl = () => {
+                  const candidate = newProductImageUrl.trim().slice(0, 500);
+                  if (!candidate) return;
+                  if (galleryList.includes(candidate)) {
+                    showToast('This image URL is already in the gallery.', 'info');
+                    return;
+                  }
+                  if (galleryList.length >= 8) {
+                    showToast('Maximum 8 images supported per product.', 'error');
+                    return;
+                  }
+                  syncProductGallery([...galleryList, candidate]);
+                  setNewProductImageUrl('');
+                };
+
+                return (
+                  <div className="bg-gray-50 border border-gray-200 rounded-xl p-3 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <label className="block text-xs font-bold text-gray-700">
+                          Product Photos ({galleryList.length}/8)
+                        </label>
+                        <p className="text-[11px] text-gray-500">
+                          First photo (#1) is used everywhere as the Front Image.
+                        </p>
+                      </div>
+                      <label className="text-[11px] font-bold text-blue-700 bg-blue-50 border border-blue-200 hover:bg-blue-100 px-2.5 py-1.5 rounded-lg cursor-pointer flex items-center gap-1 shrink-0 transition">
+                        <Upload size={12} />
+                        {uploadingProductImg ? 'Compressing...' : 'Upload Photo(s)'}
+                        <input
+                          type="file"
+                          accept="image/*"
+                          multiple
+                          disabled={uploadingProductImg || galleryList.length >= 8}
+                          onChange={async (e) => {
+                            const files: File[] = e.target.files ? Array.from(e.target.files) : [];
+                            e.target.value = '';
+                            if (files.length === 0) return;
+                            const availableSlots = Math.max(0, 8 - galleryList.length);
+                            if (availableSlots <= 0) {
+                              showToast('Maximum 8 images reached for this product.', 'error');
+                              return;
+                            }
+                            const batch = files.slice(0, availableSlots);
+                            setUploadingProductImg(true);
+                            try {
+                              const uploadedUrls: string[] = [];
+                              for (const file of batch) {
+                                const res = await uploadCompressedMedia(file, 'product');
+                                if (res.url) uploadedUrls.push(res.url);
+                              }
+                              if (uploadedUrls.length > 0) {
+                                syncProductGallery([...galleryList, ...uploadedUrls]);
+                                showToast(
+                                  `Added ${uploadedUrls.length} photo${uploadedUrls.length > 1 ? 's' : ''} to product gallery`,
+                                  'success'
+                                );
+                              }
+                            } catch (err) {
+                              const msg = err instanceof Error ? err.message : 'Image upload failed';
+                              showToast(msg, 'error');
+                            } finally {
+                              setUploadingProductImg(false);
+                            }
+                          }}
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
+
+                    {/* Visual Thumbnail Strip with Reorder & Make Front */}
+                    {galleryList.length > 0 && (
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        {galleryList.map((imgUrl, idx) => (
+                          <div
+                            key={`${imgUrl}-${idx}`}
+                            className={`relative rounded-xl overflow-hidden border bg-white ${
+                              idx === 0 ? 'border-green-500 ring-1 ring-green-500' : 'border-gray-200'
+                            }`}
+                          >
+                            <div className="h-20 bg-gray-100 relative">
+                              <img
+                                src={imgUrl}
+                                alt={`Gallery ${idx + 1}`}
+                                referrerPolicy="no-referrer"
+                                className="w-full h-full object-cover"
+                              />
+                              {idx === 0 ? (
+                                <span className="absolute top-1 left-1 bg-green-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded">
+                                  Front Image
+                                </span>
+                              ) : (
+                                <span className="absolute top-1 left-1 bg-black/60 text-white text-[9px] font-bold px-1.5 py-0.5 rounded tabular-nums">
+                                  #{idx + 1}
+                                </span>
+                              )}
+                              {galleryList.length > 1 && (
+                                <button
+                                  type="button"
+                                  title="Remove image"
+                                  onClick={() => {
+                                    const filtered = galleryList.filter((_, i) => i !== idx);
+                                    syncProductGallery(filtered);
+                                  }}
+                                  className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/70 text-white flex items-center justify-center hover:bg-red-600 transition"
+                                >
+                                  <X size={11} />
+                                </button>
+                              )}
+                            </div>
+                            <div className="p-1 flex items-center justify-between gap-1 bg-gray-50 border-t border-gray-100">
+                              <div className="flex items-center gap-0.5">
+                                <button
+                                  type="button"
+                                  disabled={idx === 0}
+                                  title="Move left"
+                                  onClick={() => {
+                                    const next = [...galleryList];
+                                    [next[idx - 1], next[idx]] = [next[idx], next[idx - 1]];
+                                    syncProductGallery(next);
+                                  }}
+                                  className="p-0.5 rounded text-gray-600 hover:bg-gray-200 disabled:opacity-30"
+                                >
+                                  <ChevronLeft size={13} />
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={idx === galleryList.length - 1}
+                                  title="Move right"
+                                  onClick={() => {
+                                    const next = [...galleryList];
+                                    [next[idx + 1], next[idx]] = [next[idx], next[idx + 1]];
+                                    syncProductGallery(next);
+                                  }}
+                                  className="p-0.5 rounded text-gray-600 hover:bg-gray-200 disabled:opacity-30"
+                                >
+                                  <ChevronRight size={13} />
+                                </button>
+                              </div>
+                              {idx > 0 ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const next = [imgUrl, ...galleryList.filter((_, i) => i !== idx)];
+                                    syncProductGallery(next);
+                                  }}
+                                  className="text-[10px] font-bold text-green-700 hover:underline px-1"
+                                >
+                                  Make Front
+                                </button>
+                              ) : (
+                                <span className="text-[10px] font-semibold text-green-700 px-1">Primary</span>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Direct Front Image URL (#1) */}
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-600 mb-1">
+                        Front Image URL (#1)
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={productForm.image}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setProductForm((prev) => ({
+                            ...prev,
+                            image: val,
+                            images: [val, ...prev.images.slice(1)]
+                          }));
+                        }}
+                        placeholder="https://... (front product image)"
+                        className="w-full p-2 bg-white border border-gray-200 rounded-lg outline-none text-xs focus:ring-2 focus:ring-green-500"
+                      />
+                    </div>
+
+                    {/* Add Additional Image URL (#2-#8) */}
+                    {galleryList.length < 8 && (
+                      <div>
+                        <label className="block text-[11px] font-bold text-gray-600 mb-1">
+                          Add Additional Product Image URL
+                        </label>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={newProductImageUrl}
+                            onChange={(e) => setNewProductImageUrl(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                handleAddExtraUrl();
+                              }
+                            }}
+                            placeholder="https://... (side view, sliced, packaging)"
+                            className="flex-1 p-2 bg-white border border-gray-200 rounded-lg outline-none text-xs focus:ring-2 focus:ring-green-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={handleAddExtraUrl}
+                            className="px-3 py-1.5 bg-gray-900 hover:bg-gray-800 text-white text-xs font-bold rounded-lg shrink-0 transition"
+                          >
+                            Add Photo
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               <div>
                 <label className="block text-xs font-bold text-gray-600 mb-1">Description</label>
@@ -3161,7 +3381,7 @@ export const AdminDashboard = () => {
               {viewingOrder.items?.map((item, idx) => (
                 <div key={idx} className="flex justify-between items-center text-sm bg-gray-50 p-2.5 rounded-lg">
                   <div className="flex items-center gap-2.5">
-                    <img src={item.image} alt={item.name} className="w-9 h-9 rounded object-cover" />
+                    <img src={getProductFrontImage(item)} alt={item.name} referrerPolicy="no-referrer" className="w-9 h-9 rounded object-cover" />
                     <div>
                       <p className="font-semibold text-gray-800">{item.name}</p>
                       <p className="text-xs text-gray-500">

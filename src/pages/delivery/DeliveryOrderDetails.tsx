@@ -17,7 +17,7 @@ import {
   Radio,
   Camera
 } from 'lucide-react';
-import { formatCurrency, formatPaymentMethodLabel } from '../../lib/utils';
+import { formatCurrency, formatPaymentMethodLabel, getProductFrontImage } from '../../lib/utils';
 import { haversineDistanceMeters, uploadCompressedMedia } from '../../lib/imageUtils';
 
 export const DeliveryOrderDetails = () => {
@@ -484,8 +484,9 @@ export const DeliveryOrderDetails = () => {
                 >
                   <div className="flex items-center gap-2.5">
                     <img
-                      src={item.image}
+                      src={getProductFrontImage(item)}
                       alt={item.name}
+                      referrerPolicy="no-referrer"
                       className="w-9 h-9 object-cover rounded bg-gray-800"
                     />
                     <div>

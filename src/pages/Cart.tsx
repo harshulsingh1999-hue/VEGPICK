@@ -1,7 +1,7 @@
 import React from 'react';
 import { useStore } from '../context/StoreContext';
 import { Minus, Plus, Trash2, ArrowRight, AlertTriangle } from 'lucide-react';
-import { formatCurrency } from '../lib/utils';
+import { formatCurrency, getProductFrontImage } from '../lib/utils';
 import { Link, useNavigate } from 'react-router-dom';
 
 export const Cart = () => {
@@ -62,7 +62,7 @@ export const Cart = () => {
           
           return (
             <div key={`${item.id}-${item.selectedWeight}`} className={`bg-white p-4 rounded-xl shadow-sm border flex gap-4 ${isOutOfStock ? 'border-red-200 bg-red-50/40' : 'border-gray-100'}`}>
-              <img src={item.image} alt={item.name} className={`w-20 h-20 object-cover rounded-lg ${isOutOfStock ? 'grayscale opacity-70' : ''}`} />
+              <img src={getProductFrontImage(item)} alt={item.name} referrerPolicy="no-referrer" className={`w-20 h-20 object-cover rounded-lg ${isOutOfStock ? 'grayscale opacity-70' : ''}`} />
               
               <div className="flex-1">
                 <div className="flex justify-between items-start">

@@ -10,6 +10,11 @@ export const STARTER_PRODUCTS: Omit<Product, 'id'>[] = [
     category: 'Fruits',
     pricePerKg: 40,
     image: 'https://images.unsplash.com/photo-1592924357228-91a4daadcfea?auto=format&fit=crop&q=80&w=1000',
+    images: [
+      'https://images.unsplash.com/photo-1592924357228-91a4daadcfea?auto=format&fit=crop&q=80&w=1000',
+      'https://images.unsplash.com/photo-1546094096-0df4bcaaa337?auto=format&fit=crop&q=80&w=1000',
+      'https://images.unsplash.com/photo-1518977822534-7049a61ee0c2?auto=format&fit=crop&q=80&w=1000'
+    ],
     available: true,
     description: 'Farm fresh red tomatoes, hand-picked daily for curries and salads.',
     rating: 4.5,
@@ -20,6 +25,11 @@ export const STARTER_PRODUCTS: Omit<Product, 'id'>[] = [
     category: 'Root Vegetables',
     pricePerKg: 30,
     image: 'https://images.unsplash.com/photo-1518977676601-b53f82aba655?auto=format&fit=crop&q=80&w=1000',
+    images: [
+      'https://images.unsplash.com/photo-1518977676601-b53f82aba655?auto=format&fit=crop&q=80&w=1000',
+      'https://images.unsplash.com/photo-1590165482129-728f910099d0?auto=format&fit=crop&q=80&w=1000',
+      'https://images.unsplash.com/photo-1508313880080-c4bef0730395?auto=format&fit=crop&q=80&w=1000'
+    ],
     available: true,
     description: 'Washed farm potatoes, ideal for roasting, curries, and everyday meals.',
     rating: 4.4,
@@ -30,6 +40,11 @@ export const STARTER_PRODUCTS: Omit<Product, 'id'>[] = [
     category: 'Leafy Greens',
     pricePerKg: 60,
     image: 'https://images.unsplash.com/photo-1576045057995-568f588f82fb?auto=format&fit=crop&q=80&w=1000',
+    images: [
+      'https://images.unsplash.com/photo-1576045057995-568f588f82fb?auto=format&fit=crop&q=80&w=1000',
+      'https://images.unsplash.com/photo-1515362778563-6a8d0e44bc0b?auto=format&fit=crop&q=80&w=1000',
+      'https://images.unsplash.com/photo-1540420773420-3366772f4999?auto=format&fit=crop&q=80&w=1000'
+    ],
     available: true,
     description: 'Crisp green spinach leaves harvested at dawn, naturally rich in iron.',
     rating: 4.8,
@@ -40,6 +55,11 @@ export const STARTER_PRODUCTS: Omit<Product, 'id'>[] = [
     category: 'Root Vegetables',
     pricePerKg: 35,
     image: 'https://images.unsplash.com/photo-1508747703703-c3bc0d1f204f?auto=format&fit=crop&q=80&w=1000',
+    images: [
+      'https://images.unsplash.com/photo-1508747703703-c3bc0d1f204f?auto=format&fit=crop&q=80&w=1000',
+      'https://images.unsplash.com/photo-1580201092675-a0a6a6cafbb1?auto=format&fit=crop&q=80&w=1000',
+      'https://images.unsplash.com/photo-1618512496248-a07fe83aa8cb?auto=format&fit=crop&q=80&w=1000'
+    ],
     available: true,
     description: 'Fresh crisp red onions, kitchen essential sourced directly from farms.',
     rating: 4.3,
@@ -50,6 +70,11 @@ export const STARTER_PRODUCTS: Omit<Product, 'id'>[] = [
     category: 'Root Vegetables',
     pricePerKg: 50,
     image: 'https://images.unsplash.com/photo-1598170845058-32b9d6a5da37?auto=format&fit=crop&q=80&w=1000',
+    images: [
+      'https://images.unsplash.com/photo-1598170845058-32b9d6a5da37?auto=format&fit=crop&q=80&w=1000',
+      'https://images.unsplash.com/photo-1582515073490-39981397c445?auto=format&fit=crop&q=80&w=1000',
+      'https://images.unsplash.com/photo-1447175008436-054170c2e979?auto=format&fit=crop&q=80&w=1000'
+    ],
     available: true,
     description: 'Sweet and crunchy orange carrots, ideal for salads and fresh juices.',
     rating: 4.6,
@@ -60,6 +85,11 @@ export const STARTER_PRODUCTS: Omit<Product, 'id'>[] = [
     category: 'Exotic',
     pricePerKg: 120,
     image: 'https://images.unsplash.com/photo-1459411621453-7debff8f5cfb?auto=format&fit=crop&q=80&w=1000',
+    images: [
+      'https://images.unsplash.com/photo-1459411621453-7debff8f5cfb?auto=format&fit=crop&q=80&w=1000',
+      'https://images.unsplash.com/photo-1584270354949-c26b0d5b4a0c?auto=format&fit=crop&q=80&w=1000',
+      'https://images.unsplash.com/photo-1615485290382-441e4d049cb5?auto=format&fit=crop&q=80&w=1000'
+    ],
     available: true,
     description: 'Hydroponically grown broccoli florets, high in fiber and vitamins.',
     rating: 4.7,
@@ -70,6 +100,10 @@ export const STARTER_PRODUCTS: Omit<Product, 'id'>[] = [
     category: 'Herbs',
     pricePerKg: 80,
     image: 'https://images.unsplash.com/photo-1589135233689-d538665f5756?auto=format&fit=crop&q=80&w=1000',
+    images: [
+      'https://images.unsplash.com/photo-1589135233689-d538665f5756?auto=format&fit=crop&q=80&w=1000',
+      'https://images.unsplash.com/photo-1615485500704-8e990f9900f7?auto=format&fit=crop&q=80&w=1000'
+    ],
     available: true,
     description: 'Aromatic fresh coriander bunches picked to preserve essential oils.',
     rating: 4.5,

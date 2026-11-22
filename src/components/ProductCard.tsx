@@ -1,7 +1,7 @@
 import React from 'react';
 import { useStore } from '../context/StoreContext';
 import { Plus, Minus, Star } from 'lucide-react';
-import { formatCurrency } from '../lib/utils';
+import { formatCurrency, getProductFrontImage, getProductImages } from '../lib/utils';
 import { Product } from '../lib/data';
 
 import { useToast } from '../context/ToastContext';
@@ -12,13 +12,15 @@ export const ProductCard = ({ product }: { product: Product }) => {
   const { addToCart } = useStore();
   const { showToast } = useToast();
   const [selectedWeight, setSelectedWeight] = React.useState(1000); // Default 1kg
+  const frontImage = getProductFrontImage(product);
+  const totalPhotos = getProductImages(product).length;
 
   const price = (product.pricePerKg / 1000) * selectedWeight;
 
   const handleAddToCart = (e: React.MouseEvent) => {
     e.preventDefault(); // Prevent navigation
     e.stopPropagation(); // Prevent bubbling to Link
-    addToCart(product, selectedWeight);
+    addToCart({ ...product, image: frontImage }, selectedWeight);
     showToast(`Added ${product.name} (${selectedWeight < 1000 ? `${selectedWeight}g` : '1kg'}) to cart`, 'success');
   };
 
@@ -26,12 +28,17 @@ export const ProductCard = ({ product }: { product: Product }) => {
     <Link to={`/product/${product.id}`} className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden flex flex-col block">
       <div className="relative w-full aspect-square bg-gray-50 p-2">
         <img 
-          src={product.image} 
+          src={frontImage} 
           alt={product.name}
           referrerPolicy="no-referrer"
           loading="lazy"
           className="w-full h-full object-contain mix-blend-multiply"
         />
+        {totalPhotos > 1 && (
+          <span className="absolute bottom-2 right-2 bg-white/90 text-gray-600 text-[10px] font-semibold px-1.5 py-0.5 rounded border border-gray-200 tabular-nums">
+            1/{totalPhotos}
+          </span>
+        )}
         {!product.available && (
           <div className="absolute inset-0 bg-black/50 flex items-center justify-center text-white font-bold">
             Out of Stock

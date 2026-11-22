@@ -2,15 +2,17 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-    <title>FreshVeggie Delivery</title>
-    <meta name="description" content="A fresh vegetable delivery application allowing customers to browse, order, and track fresh produce deliveries." />
-    
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover" />
+    <title>FreshVeggie Delivery — Farm Fresh Vegetables &amp; Fruits Delivered Fast</title>
+    <meta name="description" content="Order farm-fresh vegetables, seasonal fruits, leafy greens, and organic herbs delivered to your doorstep with live rider tracking and instant UPI, card, or COD checkout." />
+    <meta name="keywords" content="fresh vegetables delivery, online fruit delivery, organic produce, farm fresh greens, quick commerce groceries, FreshVeggie" />
+    <meta name="robots" content="index, follow" />
+
     <!-- Android / Chrome PWA Meta -->
     <meta name="theme-color" content="#16a34a" />
     <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="application-name" content="FreshVeggie" />
-    
+    <meta name="application-name" content="FreshVeggie Delivery" />
+
     <!-- iOS / Safari PWA Meta -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -18,18 +20,41 @@
     <meta name="format-detection" content="telephone=no" />
 
     <!-- OpenGraph -->
-    <meta property="og:title" content="FreshVeggie Delivery" />
-    <meta property="og:description" content="A fresh vegetable delivery application allowing customers to browse, order, and track fresh produce deliveries." />
+    <meta property="og:site_name" content="FreshVeggie Delivery" />
+    <meta property="og:title" content="FreshVeggie Delivery — Farm Fresh Vegetables &amp; Fruits" />
+    <meta property="og:description" content="Order farm-fresh vegetables, fruits, herbs, and leafy greens with same-day doorstep delivery and live tracking." />
     <meta property="og:type" content="website" />
+    <meta property="og:image" content="/pwa-512x512.png" />
+    <meta property="og:image:alt" content="FreshVeggie Delivery fresh kraft bag filled with vegetables and fruits" />
 
-    <!-- Icons & Manifest -->
-    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <!-- Twitter / X Social Card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="FreshVeggie Delivery — Farm Fresh Produce Delivered Fast" />
+    <meta name="twitter:description" content="Farm-fresh vegetables, fruits, leafy greens, and herbs delivered straight to your home with real-time order tracking." />
+    <meta name="twitter:image" content="/pwa-512x512.png" />
+
+    <!-- Icons (Photorealistic Vegetable & Fruit Bag) -->
     <link rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192.png" />
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/pwa-512x512.png" />
+    <link rel="shortcut icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+
+    <!-- Structured Data for Public Search Discovery -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "GroceryStore",
+        "name": "FreshVeggie Delivery",
+        "description": "Farm-fresh vegetables, organic greens, fruits, and herbs delivered fast to local neighbourhoods with live order tracking.",
+        "image": "/pwa-512x512.png",
+        "logo": "/app-logo.png",
+        "priceRange": "₹",
+        "paymentAccepted": ["UPI", "Debit Card", "Credit Card", "Bank Transfer", "Cash on Delivery"]
+      }
+    </script>
   </head>
   <body class="bg-gray-50 text-gray-900 select-none">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

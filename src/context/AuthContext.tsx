@@ -84,7 +84,12 @@ interface AuthContextType {
   sendPhoneOtp: (
     phoneE164: string,
     verifier: RecaptchaVerifier
-  ) => Promise<{ success: boolean; confirmationResult?: ConfirmationResult; message?: string }>;
+  ) => Promise<{
+    success: boolean;
+    confirmationResult?: ConfirmationResult;
+    message?: string;
+    code?: string;
+  }>;
   verifyPhoneOtp: (
     confirmationResult: ConfirmationResult,
     otpCode: string,
@@ -128,34 +133,54 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+const extractAuthErrorCode = (err: unknown): string => {
+  if (err && typeof err === 'object' && 'code' in err) {
+    return String((err as { code: unknown }).code || '');
+  }
+  const msg = err instanceof Error ? err.message : String(err || '');
+  const match = msg.match(/auth\/[a-z0-9-]+/i);
+  return match ? match[0].toLowerCase() : '';
+};
+
 const formatPhoneAuthError = (err: unknown): string => {
-  const code =
-    err && typeof err === 'object' && 'code' in err ? String((err as { code: unknown }).code) : '';
+  const code = extractAuthErrorCode(err);
   const msg = err instanceof Error ? err.message : String(err || 'Authentication failed');
+  const host = typeof window !== 'undefined' ? window.location.hostname : '';
 
   if (code === 'auth/operation-not-allowed') {
-    return 'Phone OTP sign-in is not yet enabled in Firebase Console (Authentication → Sign-in method → Phone).';
+    return 'Phone OTP sign-in is disabled in Firebase Console. Enable Authentication → Sign-in method → Phone for this project.';
   }
   if (code === 'auth/unauthorized-domain' || msg.includes('unauthorized-domain')) {
-    return 'This preview domain is not yet added to Firebase Authentication → Settings → Authorized domains.';
+    return `Domain "${host || 'this URL'}" is not yet allowlisted in Firebase Console → Authentication → Settings → Authorized domains.`;
   }
-  if (code === 'auth/invalid-phone-number') {
-    return 'Invalid mobile number. Enter digits with your country code (e.g. +91 9876543210).';
+  if (code === 'auth/invalid-phone-number' || code === 'auth/missing-phone-number') {
+    return 'Invalid mobile number. Select your country code and enter your 10-digit number without leading 0.';
   }
   if (code === 'auth/too-many-requests') {
-    return 'Too many OTP attempts. Please wait a moment before requesting another code.';
+    return 'Too many OTP attempts from this device or number. Please wait a few minutes and try again.';
   }
-  if (code === 'auth/quota-exceeded') {
-    return 'SMS quota exceeded for this Firebase project.';
+  if (code === 'auth/quota-exceeded' || code === 'auth/billing-not-enabled') {
+    return 'SMS sending is unavailable because Firebase Phone Auth SMS billing/quota needs setup in Firebase Console.';
   }
   if (code === 'auth/invalid-verification-code') {
     return 'Incorrect OTP code. Please check the 6-digit SMS code and try again.';
   }
-  if (code === 'auth/code-expired') {
-    return 'This OTP has expired. Please request a fresh verification code.';
+  if (code === 'auth/code-expired' || code === 'auth/session-expired') {
+    return 'This OTP session has expired. Please request a fresh verification code.';
   }
-  if (code === 'auth/captcha-check-failed') {
-    return 'reCAPTCHA verification failed. Please retry in a moment.';
+  if (
+    code === 'auth/captcha-check-failed' ||
+    code === 'auth/invalid-app-credential' ||
+    code === 'auth/missing-client-identifier' ||
+    code === 'auth/internal-error'
+  ) {
+    return 'reCAPTCHA security check could not complete automatically. Please solve the verification checkbox or try again.';
+  }
+  if (code === 'auth/network-request-failed') {
+    return 'Network error contacting Google SMS verification. Check internet connection or disable strict content blockers.';
+  }
+  if (code === 'auth/web-storage-unsupported') {
+    return 'Browser storage/cookies are blocked. Enable cookies/storage for this site to verify OTP.';
   }
   return msg;
 };
@@ -449,8 +474,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (existingData.isBlocked) {
           return { blocked: true };
         }
-        // Backfill verified phone number if customer profile was created earlier without a phone
-        if (!existingData.phone && verifiedDigits.length >= 10) {
+        // Sync verified OTP phone number when profile has no phone yet
+        if (!existingData.phone && verifiedDigits.length >= 10 && verifiedDigits.length <= 15) {
           await updateDoc(userRef, {
             phone: verifiedDigits,
             updatedAt: serverTimestamp()
@@ -523,12 +548,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const sendPhoneOtp = async (
     phoneE164: string,
     verifier: RecaptchaVerifier
-  ): Promise<{ success: boolean; confirmationResult?: ConfirmationResult; message?: string }> => {
+  ): Promise<{
+    success: boolean;
+    confirmationResult?: ConfirmationResult;
+    message?: string;
+    code?: string;
+  }> => {
+    const cleanedE164 = '+' + phoneE164.replace(/\D/g, '');
+    if (!/^\+[1-9][0-9]{7,14}$/.test(cleanedE164)) {
+      return {
+        success: false,
+        code: 'auth/invalid-phone-number',
+        message: 'Invalid mobile number format. Select country code and enter 10 digits without leading 0.'
+      };
+    }
     try {
-      const confirmationResult = await signInWithPhoneNumber(auth, phoneE164, verifier);
+      const confirmationResult = await signInWithPhoneNumber(auth, cleanedE164, verifier);
       return { success: true, confirmationResult };
     } catch (error) {
-      return { success: false, message: formatPhoneAuthError(error) };
+      return {
+        success: false,
+        code: extractAuthErrorCode(error),
+        message: formatPhoneAuthError(error)
+      };
     }
   };
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { ConfirmationResult, RecaptchaVerifier } from 'firebase/auth';
 import { Phone, KeyRound, ShieldCheck, RefreshCw, ArrowLeft, AlertCircle } from 'lucide-react';
 import { auth } from '../lib/firebase';
@@ -18,13 +18,25 @@ interface PhoneOtpAuthCardProps {
 }
 
 const COUNTRY_CODES = [
-  { code: '+91', label: '🇮🇳 +91' },
-  { code: '+1', label: '🇺🇸 +1' },
-  { code: '+44', label: '🇬🇧 +44' },
-  { code: '+971', label: '🇦🇪 +971' },
-  { code: '+61', label: '🇦🇺 +61' },
-  { code: '+65', label: '🇸🇬 +65' }
+  { code: '+91', dial: '91', label: '🇮🇳 +91', minLen: 10, maxLen: 10 },
+  { code: '+1', dial: '1', label: '🇺🇸 +1', minLen: 10, maxLen: 10 },
+  { code: '+44', dial: '44', label: '🇬🇧 +44', minLen: 10, maxLen: 11 },
+  { code: '+971', dial: '971', label: '🇦🇪 +971', minLen: 9, maxLen: 9 },
+  { code: '+61', dial: '61', label: '🇦🇺 +61', minLen: 9, maxLen: 9 },
+  { code: '+65', dial: '65', label: '🇸🇬 +65', minLen: 8, maxLen: 8 }
 ];
+
+const normalizeLocalPhone = (rawDigits: string, countryCode: string): string => {
+  const country = COUNTRY_CODES.find((c) => c.code === countryCode);
+  let clean = rawDigits.replace(/\D/g, '');
+  // Strip duplicate pasted country dial prefix (e.g. 919876543210 when +91 is selected)
+  if (country && clean.startsWith(country.dial) && clean.length > country.maxLen) {
+    clean = clean.slice(country.dial.length);
+  }
+  // Strip national leading trunk zero (e.g. 09876543210 -> 9876543210)
+  clean = clean.replace(/^0+/, '');
+  return clean.slice(0, 14);
+};
 
 export const PhoneOtpAuthCard: React.FC<PhoneOtpAuthCardProps> = ({
   title,
@@ -41,9 +53,10 @@ export const PhoneOtpAuthCard: React.FC<PhoneOtpAuthCardProps> = ({
   const { showToast } = useToast();
 
   const rawId = useId();
-  const containerId = `recaptcha-box-${rawId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
-  const recaptchaContainerRef = useRef<HTMLDivElement | null>(null);
+  const baseBoxId = `recaptcha-box-${rawId.replace(/[^a-zA-Z0-9_-]/g, '')}`;
+  const recaptchaHostRef = useRef<HTMLDivElement | null>(null);
   const recaptchaVerifierRef = useRef<RecaptchaVerifier | null>(null);
+  const mountAttemptRef = useRef(0);
 
   const [countryCode, setCountryCode] = useState('+91');
   const [phoneDigits, setPhoneDigits] = useState('');
@@ -56,17 +69,84 @@ export const PhoneOtpAuthCard: React.FC<PhoneOtpAuthCardProps> = ({
   const [googleLoading, setGoogleLoading] = useState(false);
   const [resendSeconds, setResendSeconds] = useState(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [recaptchaMode, setRecaptchaMode] = useState<'invisible' | 'normal'>('invisible');
+  const [normalCaptchaSolved, setNormalCaptchaSolved] = useState(false);
+
+  const clearRecaptcha = useCallback(() => {
+    try {
+      recaptchaVerifierRef.current?.clear();
+    } catch {
+      // ignore if already cleared or unmounted
+    }
+    recaptchaVerifierRef.current = null;
+    setNormalCaptchaSolved(false);
+    if (recaptchaHostRef.current) {
+      recaptchaHostRef.current.innerHTML = '';
+    }
+  }, []);
+
+  const mountRecaptchaVerifier = useCallback(
+    async (mode: 'invisible' | 'normal'): Promise<RecaptchaVerifier> => {
+      if (!recaptchaHostRef.current) {
+        throw new Error('Verification container is not mounted yet. Please retry.');
+      }
+      clearRecaptcha();
+
+      // Always create a fresh child DOM node so grecaptcha never errors with "already rendered in this element"
+      mountAttemptRef.current += 1;
+      const childDiv = document.createElement('div');
+      childDiv.id = `${baseBoxId}-${mountAttemptRef.current}`;
+      recaptchaHostRef.current.appendChild(childDiv);
+
+      const verifier = new RecaptchaVerifier(auth, childDiv, {
+        size: mode,
+        theme: theme === 'dark' ? 'dark' : 'light',
+        callback: () => {
+          if (mode === 'normal') {
+            setNormalCaptchaSolved(true);
+            setErrorMsg(null);
+          }
+        },
+        'expired-callback': () => {
+          setNormalCaptchaSolved(false);
+          if (mode === 'normal') {
+            setErrorMsg('Security check expired. Please tick the verification checkbox again.');
+          }
+        },
+        'error-callback': () => {
+          setNormalCaptchaSolved(false);
+        }
+      });
+
+      recaptchaVerifierRef.current = verifier;
+      await verifier.render();
+      return verifier;
+    },
+    [baseBoxId, clearRecaptcha, theme]
+  );
+
+  // When switched to interactive ('normal') mode on phone step, render the visible reCAPTCHA checkbox immediately
+  useEffect(() => {
+    if (step !== 'phone' || recaptchaMode !== 'normal') {
+      return;
+    }
+    let active = true;
+    void mountRecaptchaVerifier('normal').catch((err) => {
+      if (active) {
+        const msg = err instanceof Error ? err.message : 'Unable to load verification checkbox.';
+        setErrorMsg(msg);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [step, recaptchaMode, mountRecaptchaVerifier]);
 
   useEffect(() => {
     return () => {
-      try {
-        recaptchaVerifierRef.current?.clear();
-      } catch {
-        // ignore unmount clear errors
-      }
-      recaptchaVerifierRef.current = null;
+      clearRecaptcha();
     };
-  }, []);
+  }, [clearRecaptcha]);
 
   useEffect(() => {
     if (resendSeconds <= 0) return;
@@ -76,50 +156,44 @@ export const PhoneOtpAuthCard: React.FC<PhoneOtpAuthCardProps> = ({
     return () => window.clearInterval(timer);
   }, [resendSeconds]);
 
-  const clearRecaptcha = () => {
-    try {
-      recaptchaVerifierRef.current?.clear();
-    } catch {
-      // ignore if already cleared
-    }
-    recaptchaVerifierRef.current = null;
-    if (recaptchaContainerRef.current) {
-      recaptchaContainerRef.current.innerHTML = '';
-    }
-  };
-
-  const buildE164Phone = (): string => {
-    const cleanLocal = phoneDigits.replace(/\D/g, '');
-    return `${countryCode}${cleanLocal}`;
-  };
+  const normalizedLocal = normalizeLocalPhone(phoneDigits, countryCode);
+  const buildE164Phone = (): string => `${countryCode}${normalizedLocal}`;
 
   const handleSendOtp = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setErrorMsg(null);
 
-    const cleanLocal = phoneDigits.replace(/\D/g, '');
-    if (cleanLocal.length < 8 || cleanLocal.length > 14) {
-      const msg = 'Enter a valid mobile number (10 digits for India).';
+    const selectedCountry = COUNTRY_CODES.find((c) => c.code === countryCode);
+    const minDigits = selectedCountry?.minLen ?? 8;
+    const maxDigits = selectedCountry?.maxLen ?? 14;
+
+    if (normalizedLocal.length < minDigits || normalizedLocal.length > maxDigits) {
+      const msg =
+        minDigits === 10 && maxDigits === 10
+          ? `Enter a valid 10-digit mobile number for ${countryCode} (without leading 0).`
+          : `Enter a valid ${minDigits}–${maxDigits} digit mobile number for ${countryCode}.`;
       setErrorMsg(msg);
       showToast(msg, 'error');
       return;
     }
 
-    if (!recaptchaContainerRef.current) {
-      setErrorMsg('Verification widget not ready. Please retry.');
+    if (recaptchaMode === 'normal' && !normalCaptchaSolved) {
+      const msg = 'Please complete the "I\'m not a robot" verification checkbox below first.';
+      setErrorMsg(msg);
+      showToast(msg, 'error');
       return;
     }
 
     setSending(true);
     try {
-      clearRecaptcha();
-      const verifier = new RecaptchaVerifier(auth, recaptchaContainerRef.current, {
-        size: 'invisible'
-      });
-      recaptchaVerifierRef.current = verifier;
+      const verifier =
+        recaptchaMode === 'normal' && recaptchaVerifierRef.current
+          ? recaptchaVerifierRef.current
+          : await mountRecaptchaVerifier(recaptchaMode);
 
       const e164 = buildE164Phone();
       const res = await sendPhoneOtp(e164, verifier);
+
       if (res.success && res.confirmationResult) {
         setConfirmationResult(res.confirmationResult);
         setStep('otp');
@@ -128,9 +202,31 @@ export const PhoneOtpAuthCard: React.FC<PhoneOtpAuthCardProps> = ({
         showToast(`OTP sent to ${e164}`, 'success');
       } else {
         clearRecaptcha();
-        const msg = res.message || 'Unable to send OTP. Please try again.';
-        setErrorMsg(msg);
-        showToast(msg, 'error');
+        const rawCode = res.code || '';
+        const needsInteractiveFallback =
+          recaptchaMode === 'invisible' &&
+          [
+            'auth/captcha-check-failed',
+            'auth/invalid-app-credential',
+            'auth/missing-client-identifier',
+            'auth/internal-error'
+          ].includes(rawCode);
+
+        if (needsInteractiveFallback) {
+          setRecaptchaMode('normal');
+          const msg =
+            'Invisible verification was blocked by your browser or preview iframe. Please tick the "I\'m not a robot" checkbox below and tap Send OTP again.';
+          setErrorMsg(msg);
+          showToast('Complete the interactive checkbox below to send OTP', 'info');
+        } else {
+          if (recaptchaMode === 'normal') {
+            // Re-render fresh checkbox for next try
+            void mountRecaptchaVerifier('normal').catch(() => {});
+          }
+          const msg = res.message || 'Unable to send OTP. Please try again.';
+          setErrorMsg(msg);
+          showToast(msg, 'error');
+        }
       }
     } catch (err) {
       clearRecaptcha();
@@ -168,6 +264,7 @@ export const PhoneOtpAuthCard: React.FC<PhoneOtpAuthCardProps> = ({
       });
 
       if (res.success) {
+        clearRecaptcha();
         showToast('Mobile number verified!', 'success');
         onSuccess?.();
       } else {
@@ -237,7 +334,7 @@ export const PhoneOtpAuthCard: React.FC<PhoneOtpAuthCardProps> = ({
           }`}
         >
           <AlertCircle size={15} className="shrink-0 mt-0.5" />
-          <span>{errorMsg}</span>
+          <span className="leading-relaxed">{errorMsg}</span>
         </div>
       )}
 
@@ -255,7 +352,10 @@ export const PhoneOtpAuthCard: React.FC<PhoneOtpAuthCardProps> = ({
               <select
                 aria-label="Country code"
                 value={countryCode}
-                onChange={(e) => setCountryCode(e.target.value)}
+                onChange={(e) => {
+                  setCountryCode(e.target.value);
+                  setErrorMsg(null);
+                }}
                 className={`px-2.5 py-3 rounded-xl border text-xs font-bold outline-none ${ringClass} ${
                   isDark
                     ? 'bg-gray-900 border-gray-700 text-white'
@@ -283,7 +383,7 @@ export const PhoneOtpAuthCard: React.FC<PhoneOtpAuthCardProps> = ({
                   placeholder="Enter 10-digit number"
                   value={phoneDigits}
                   onChange={(e) => {
-                    const cleaned = e.target.value.replace(/\D/g, '').slice(0, 14);
+                    const cleaned = normalizeLocalPhone(e.target.value, countryCode);
                     setPhoneDigits(cleaned);
                   }}
                   className={`w-full pl-9 pr-3 py-3 rounded-xl border text-sm font-medium outline-none focus:ring-2 ${ringClass} ${
@@ -299,12 +399,30 @@ export const PhoneOtpAuthCard: React.FC<PhoneOtpAuthCardProps> = ({
 
           <button
             type="submit"
-            disabled={sending || phoneDigits.length < 8}
+            disabled={sending || normalizedLocal.length < 8}
             className={`w-full py-3.5 px-4 rounded-xl font-bold text-sm flex items-center justify-center gap-2 shadow-md transition disabled:opacity-50 ${primaryBtn}`}
           >
             <Phone size={17} />
             {sending ? 'Sending OTP...' : 'Send Verification OTP'}
           </button>
+
+          <div className="flex items-center justify-center">
+            <button
+              type="button"
+              onClick={() => {
+                setErrorMsg(null);
+                clearRecaptcha();
+                setRecaptchaMode((prev) => (prev === 'invisible' ? 'normal' : 'invisible'));
+              }}
+              className={`text-[11px] font-medium hover:underline ${
+                isDark ? 'text-gray-400 hover:text-gray-200' : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              {recaptchaMode === 'invisible'
+                ? 'Having trouble receiving OTP? Switch to verification checkbox'
+                : 'Use automatic security verification'}
+            </button>
+          </div>
         </form>
       ) : (
         <form onSubmit={handleVerifyOtp} className="space-y-3.5">
@@ -422,8 +540,13 @@ export const PhoneOtpAuthCard: React.FC<PhoneOtpAuthCardProps> = ({
         </form>
       )}
 
-      {/* Invisible reCAPTCHA mount target for Firebase Phone Auth */}
-      <div id={containerId} ref={recaptchaContainerRef} className="hidden" />
+      {/* Visible/non-hidden reCAPTCHA mount target — never display:none so challenge frames render reliably */}
+      <div
+        ref={recaptchaHostRef}
+        className={`flex justify-center overflow-x-auto ${
+          step === 'phone' && recaptchaMode === 'normal' ? 'pt-1 min-h-[78px]' : 'min-h-0'
+        }`}
+      />
 
       {showGoogleFallback && (
         <>

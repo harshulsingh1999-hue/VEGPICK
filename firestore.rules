@@ -157,7 +157,7 @@ service cloud.firestore {
           'createdAt', 'updatedAt'
         ]) &&
         data.keys().hasOnly([
-          'id', 'name', 'category', 'pricePerKg', 'image',
+          'id', 'name', 'category', 'pricePerKg', 'image', 'images',
           'available', 'description', 'rating', 'reviews',
           'createdAt', 'updatedAt'
         ]) &&
@@ -166,6 +166,20 @@ service cloud.firestore {
         data.category in ['Leafy Greens', 'Root Vegetables', 'Fruits', 'Herbs', 'Exotic'] &&
         data.pricePerKg is number && data.pricePerKg >= 0 && data.pricePerKg <= 100000 &&
         isValidString(data.image, 1, 500) &&
+        (!data.keys().hasAny(['images']) || (
+          data.images is list &&
+          data.images.size() >= 1 &&
+          data.images.size() <= 8 &&
+          isValidString(data.images[0], 1, 500) &&
+          data.images[0] == data.image &&
+          (data.images.size() < 2 || isValidString(data.images[1], 1, 500)) &&
+          (data.images.size() < 3 || isValidString(data.images[2], 1, 500)) &&
+          (data.images.size() < 4 || isValidString(data.images[3], 1, 500)) &&
+          (data.images.size() < 5 || isValidString(data.images[4], 1, 500)) &&
+          (data.images.size() < 6 || isValidString(data.images[5], 1, 500)) &&
+          (data.images.size() < 7 || isValidString(data.images[6], 1, 500)) &&
+          (data.images.size() < 8 || isValidString(data.images[7], 1, 500))
+        )) &&
         data.available is bool &&
         isValidString(data.description, 0, 1000) &&
         data.rating is number && data.rating >= 0 && data.rating <= 5 &&
@@ -406,6 +420,12 @@ service cloud.firestore {
     // =====================================================================
     // Collection Rules
     // =====================================================================
+
+    // 0. Public Read-Only Connection Probe
+    match /test/{docId} {
+      allow get: if isValidId(docId) && docId == 'connection';
+      allow list, write: if false;
+    }
 
     // 1. Admins Allowlist
     match /admins/{uid} {

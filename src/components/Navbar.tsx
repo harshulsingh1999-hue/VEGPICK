@@ -2,6 +2,7 @@ import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Home, ShoppingCart, User, Search, History } from 'lucide-react';
 import { useStore } from '../context/StoreContext';
+import { AppLogo } from './AppLogo';
 
 export const Navbar = () => {
   const { cart } = useStore();
@@ -19,8 +20,9 @@ export const Navbar = () => {
   return (
     <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 pt-1 pb-1 safe-bottom px-2 z-50 md:sticky md:top-0 md:bottom-auto md:border-t-0 md:border-b md:pt-2 md:pb-2">
       <div className="max-w-7xl mx-auto flex justify-around md:justify-between items-center">
-        <Link to="/home" className="hidden md:flex items-center gap-2">
-          <span className="text-2xl font-bold text-green-600">FreshVeggie</span>
+        <Link to="/home" className="hidden md:flex items-center gap-2.5 shrink-0">
+          <AppLogo size={34} roundedClassName="rounded-lg" className="shadow-xs" />
+          <span className="text-2xl font-bold text-green-600 whitespace-nowrap">FreshVeggie</span>
         </Link>
 
         <div className="flex w-full md:w-auto justify-around md:gap-8">

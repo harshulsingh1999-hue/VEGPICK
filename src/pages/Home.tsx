@@ -14,6 +14,7 @@ import { CATEGORIES, Product } from '../lib/data';
 import { useStore } from '../context/StoreContext';
 import { ProductCard } from '../components/ProductCard';
 import { Sidebar } from '../components/Sidebar';
+import { AppLogo } from '../components/AppLogo';
 import { useToast } from '../context/ToastContext';
 
 const BANNER_PALETTES = [
@@ -40,8 +41,12 @@ const BANNER_PALETTES = [
   }
 ];
 
+const FRESH_ARRIVALS_CATEGORY = 'Fresh Arrivals';
+
 const getCategoryVisual = (cat: string): { emoji: string; surface: string; tagline: string } => {
   switch (cat) {
+    case FRESH_ARRIVALS_CATEGORY:
+      return { emoji: '🌱', surface: 'bg-green-100 text-green-800', tagline: 'Newest farm harvest picks' };
     case 'Leafy Greens':
       return { emoji: '🥬', surface: 'bg-emerald-50 text-emerald-700', tagline: 'Spinach, kale & crisp greens' };
     case 'Root Vegetables':
@@ -108,36 +113,46 @@ export const Home = () => {
     return sorted.slice(0, 8);
   }, [products]);
 
-  // All store categories: built-in categories + any custom categories published in Firestore
+  // All Categories list: "Fresh Arrivals" FIRST, followed by all store produce categories
   const allCategories = useMemo(() => {
     const base = CATEGORIES.filter((c) => c !== 'All') as string[];
     const seen = new Set(base.map((c) => c.toLowerCase()));
-    const merged = [...base];
+    const storeCategories = [...base];
     products.forEach((p) => {
       const cat = (p.category || '').trim();
-      if (cat && cat.toLowerCase() !== 'all' && !seen.has(cat.toLowerCase())) {
+      if (
+        cat &&
+        cat.toLowerCase() !== 'all' &&
+        cat.toLowerCase() !== FRESH_ARRIVALS_CATEGORY.toLowerCase() &&
+        !seen.has(cat.toLowerCase())
+      ) {
         seen.add(cat.toLowerCase());
-        merged.push(cat);
+        storeCategories.push(cat);
       }
     });
-    return merged;
+    return [FRESH_ARRIVALS_CATEGORY, ...storeCategories];
   }, [products]);
 
   const productsByCategory = useMemo(() => {
-    const grouped: Record<string, Product[]> = {};
+    const grouped: Record<string, Product[]> = {
+      [FRESH_ARRIVALS_CATEGORY]: freshArrivals
+    };
     allCategories.forEach((cat) => {
-      grouped[cat] = [];
+      if (cat !== FRESH_ARRIVALS_CATEGORY) {
+        grouped[cat] = [];
+      }
     });
     products.forEach((p) => {
       const key =
-        allCategories.find((c) => c.toLowerCase() === (p.category || '').trim().toLowerCase()) ||
-        (p.category || '').trim();
-      if (!key) return;
+        allCategories.find(
+          (c) => c !== FRESH_ARRIVALS_CATEGORY && c.toLowerCase() === (p.category || '').trim().toLowerCase()
+        ) || (p.category || '').trim();
+      if (!key || key === FRESH_ARRIVALS_CATEGORY) return;
       if (!grouped[key]) grouped[key] = [];
       grouped[key].push(p);
     });
     return grouped;
-  }, [allCategories, products]);
+  }, [allCategories, freshArrivals, products]);
 
   const visibleCategorySections = useMemo(() => {
     if (activeHomeCategory !== 'All') {
@@ -192,7 +207,14 @@ export const Home = () => {
             >
               <Menu size={24} className="text-white" />
             </button>
-            <span className="text-xl font-bold tracking-tight whitespace-nowrap">FreshVeggie</span>
+            <div className="flex items-center gap-2.5">
+              <AppLogo
+                size={34}
+                roundedClassName="rounded-lg"
+                className="shadow-xs ring-1 ring-white/25"
+              />
+              <span className="text-xl font-bold tracking-tight whitespace-nowrap">FreshVeggie</span>
+            </div>
             <div className="w-10"></div>
           </div>
 
@@ -417,74 +439,8 @@ export const Home = () => {
         )}
       </div>
 
-      {/* Fresh Arrivals Section */}
-      <section aria-labelledby="fresh-arrivals-heading" className="px-4 mt-8">
-        <div className="flex items-end justify-between gap-4 mb-4">
-          <div>
-            <h2 id="fresh-arrivals-heading" className="font-bold text-lg sm:text-xl text-gray-900">
-              Fresh Arrivals
-            </h2>
-            <p className="text-xs text-gray-500 mt-0.5 tabular-nums">
-              Newest farm harvest picks · {freshArrivals.length} featured
-            </p>
-          </div>
-          <Link
-            to="/browse"
-            onClick={() => setSelectedCategory('All')}
-            className="text-green-700 hover:text-green-800 text-xs sm:text-sm font-semibold flex items-center gap-1 whitespace-nowrap shrink-0"
-          >
-            See All <ArrowRight size={14} />
-          </Link>
-        </div>
-
-        {productsLoading ? (
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
-            {[1, 2, 3, 4].map((skeleton) => (
-              <div
-                key={skeleton}
-                className="bg-white rounded-2xl p-3 border border-gray-100 h-56 animate-pulse"
-              >
-                <div className="bg-gray-100 h-28 rounded-xl mb-3"></div>
-                <div className="bg-gray-100 h-4 w-2/3 rounded mb-2"></div>
-                <div className="bg-gray-100 h-3 w-1/2 rounded"></div>
-              </div>
-            ))}
-          </div>
-        ) : freshArrivals.length > 0 ? (
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
-            {freshArrivals.map((product) => (
-              <div key={product.id}>
-                <ProductCard product={product} />
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="bg-white rounded-2xl border border-gray-100 p-6 text-center space-y-3 shadow-xs">
-            <div className="w-12 h-12 rounded-full bg-green-50 text-green-600 flex items-center justify-center mx-auto">
-              <Sprout size={24} />
-            </div>
-            <div>
-              <h3 className="font-bold text-gray-800 text-sm">
-                Store Catalog Awaiting Setup
-              </h3>
-              <p className="text-xs text-gray-500 mt-1">
-                No vegetables have been published to Firestore yet. Store Admin can
-                publish the initial catalog or add items in the Admin Portal.
-              </p>
-            </div>
-            <Link
-              to="/admin/login"
-              className="inline-flex items-center gap-1.5 text-xs font-bold bg-blue-600 text-white px-4 py-2 rounded-xl hover:bg-blue-700 transition"
-            >
-              <Shield size={14} />
-              Open Admin Portal
-            </Link>
-          </div>
-        )}
-      </section>
-
-      {/* All Categories Section (directly below Fresh Arrivals) */}
-      <section aria-labelledby="all-categories-heading" className="px-4 mt-10 pt-6 border-t border-gray-100 space-y-8">
+      {/* All Categories Section with Fresh Arrivals Listed Firstly */}
+      <section aria-labelledby="all-categories-heading" className="px-4 mt-8 space-y-8">
         <div>
           <div className="flex items-end justify-between gap-4 mb-4">
             <div>
@@ -492,7 +448,7 @@ export const Home = () => {
                 All Categories
               </h2>
               <p className="text-xs text-gray-500 mt-0.5 tabular-nums">
-                {allCategories.length} produce categories · {products.length} total items
+                Fresh Arrivals first · {allCategories.length} categories · {products.length} total items
               </p>
             </div>
             <div className="flex items-center gap-3 shrink-0">
@@ -515,8 +471,8 @@ export const Home = () => {
             </div>
           </div>
 
-          {/* Interactive All Categories Cards Grid */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          {/* Interactive All Categories Grid (Fresh Arrivals is #1 first card) */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
             {allCategories.map((cat) => {
               const visual = getCategoryVisual(cat);
               const count = productsByCategory[cat]?.length || 0;
@@ -528,14 +484,14 @@ export const Home = () => {
                   onClick={() =>
                     setActiveHomeCategory((prev) => (prev === cat ? 'All' : cat))
                   }
-                  className={`text-left p-3.5 rounded-2xl border transition-all flex items-center gap-3 ${
+                  className={`text-left p-3 rounded-2xl border transition-all flex items-center gap-3 ${
                     isSelected
                       ? 'bg-green-50 border-green-500 shadow-xs'
                       : 'bg-white border-gray-200 hover:border-green-300 hover:bg-gray-50/70'
                   }`}
                 >
                   <div
-                    className={`w-12 h-12 rounded-xl flex items-center justify-center text-2xl shrink-0 ${visual.surface}`}
+                    className={`w-11 h-11 rounded-xl flex items-center justify-center text-2xl shrink-0 ${visual.surface}`}
                   >
                     {visual.emoji}
                   </div>
@@ -551,12 +507,48 @@ export const Home = () => {
           </div>
         </div>
 
-        {/* Category-wise Produce Shelves below All Categories */}
-        {!productsLoading && products.length > 0 && (
-          <div className="space-y-8">
+        {/* Product Shelves: Fresh Arrivals first, followed by all other categories below */}
+        {productsLoading ? (
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
+            {[1, 2, 3, 4].map((skeleton) => (
+              <div
+                key={skeleton}
+                className="bg-white rounded-2xl p-3 border border-gray-100 h-56 animate-pulse"
+              >
+                <div className="bg-gray-100 h-28 rounded-xl mb-3"></div>
+                <div className="bg-gray-100 h-4 w-2/3 rounded mb-2"></div>
+                <div className="bg-gray-100 h-3 w-1/2 rounded"></div>
+              </div>
+            ))}
+          </div>
+        ) : products.length === 0 ? (
+          <div className="bg-white rounded-2xl border border-gray-100 p-6 text-center space-y-3 shadow-xs">
+            <div className="w-12 h-12 rounded-full bg-green-50 text-green-600 flex items-center justify-center mx-auto">
+              <Sprout size={24} />
+            </div>
+            <div>
+              <h3 className="font-bold text-gray-800 text-sm">
+                Store Catalog Awaiting Setup
+              </h3>
+              <p className="text-xs text-gray-500 mt-1">
+                No vegetables have been published to Firestore yet. Store Admin can
+                publish the initial catalog or add items in the Admin Portal.
+              </p>
+            </div>
+            <Link
+              to="/admin/login"
+              className="inline-flex items-center gap-1.5 text-xs font-bold bg-blue-600 text-white px-4 py-2 rounded-xl hover:bg-blue-700 transition"
+            >
+              <Shield size={14} />
+              Open Admin Portal
+            </Link>
+          </div>
+        ) : (
+          <div className="space-y-9">
             {visibleCategorySections.map((cat) => {
               const catProducts = productsByCategory[cat] || [];
               const visual = getCategoryVisual(cat);
+              const browseTarget = cat === FRESH_ARRIVALS_CATEGORY ? 'All' : cat;
 
               return (
                 <div key={cat} className="space-y-3">
@@ -569,7 +561,7 @@ export const Home = () => {
                         {visual.emoji}
                       </span>
                       <div className="min-w-0">
-                        <h3 className="font-bold text-base text-gray-900 truncate">{cat}</h3>
+                        <h3 className="font-bold text-base sm:text-lg text-gray-900 truncate">{cat}</h3>
                         <p className="text-xs text-gray-500 truncate">
                           {visual.tagline} · <span className="tabular-nums">{catProducts.length} items</span>
                         </p>
@@ -578,17 +570,18 @@ export const Home = () => {
 
                     <Link
                       to="/browse"
-                      onClick={() => setSelectedCategory(cat)}
+                      onClick={() => setSelectedCategory(browseTarget)}
                       className="text-green-700 hover:text-green-800 text-xs font-semibold flex items-center gap-1 whitespace-nowrap shrink-0"
                     >
-                      Explore {cat} <ArrowRight size={13} />
+                      {cat === FRESH_ARRIVALS_CATEGORY ? 'See All' : `Explore ${cat}`}{' '}
+                      <ArrowRight size={13} />
                     </Link>
                   </div>
 
                   {catProducts.length > 0 ? (
                     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
                       {catProducts.map((product) => (
-                        <div key={product.id}>
+                        <div key={`${cat}-${product.id}`}>
                           <ProductCard product={product} />
                         </div>
                       ))}

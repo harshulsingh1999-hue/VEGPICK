@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import { useAuth } from '../context/AuthContext';
 import { useStore } from '../context/StoreContext';
-import { formatCurrency, formatPaymentMethodLabel, getOrderBillingBreakdown } from '../lib/utils';
+import { formatCurrency, formatPaymentMethodLabel, getOrderBillingBreakdown, getProductFrontImage } from '../lib/utils';
 import { db } from '../lib/firebase';
 import { ActiveDelivery } from '../lib/data';
 import {
@@ -342,8 +342,9 @@ export const OrderDetails = () => {
             <div key={i} className="flex justify-between items-center py-2 border-b border-gray-50 last:border-b-0">
               <div className="flex items-center gap-3">
                 <img
-                  src={item.image}
+                  src={getProductFrontImage(item)}
                   alt={item.name}
+                  referrerPolicy="no-referrer"
                   className="w-12 h-12 rounded-xl object-cover bg-gray-50 border border-gray-100"
                 />
                 <div>
