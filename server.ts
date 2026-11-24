@@ -7,6 +7,12 @@ import dotenv from 'dotenv';
 import { createCloudStack, type FirebaseAppletMeta } from './server/cloudStack.ts';
 
 dotenv.config();
+if (fs.existsSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '.env.local'))) {
+  dotenv.config({
+    path: path.join(path.dirname(fileURLToPath(import.meta.url)), '.env.local'),
+    override: false
+  });
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -553,7 +559,9 @@ async function startServer() {
 
   app.post('/api/admin/databases/action', requireAdmin, async (req, res) => {
     const action = typeof req.body?.action === 'string' ? req.body.action : '';
-    const result = await cloud.runDatabaseAction(action);
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const result = await cloud.runDatabaseAction(action, token);
     res.status(result.ok ? 200 : 400).json(result);
   });
 

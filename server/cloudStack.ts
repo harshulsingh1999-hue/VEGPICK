@@ -3,6 +3,9 @@ import fs from 'fs';
 import path from 'path';
 import v8 from 'v8';
 import Database from 'better-sqlite3';
+import { Redis } from '@upstash/redis';
+import { Ratelimit } from '@upstash/ratelimit';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 export interface FirebaseAppletMeta {
   projectId?: string;
@@ -124,6 +127,7 @@ export interface DatabaseStorageEntry {
   recordCount: number | null;
   usageLabel: string;
   balanceLabel: string;
+  statusNote?: string | null;
   details: Record<string, string | number | boolean | null>;
 }
 
@@ -258,13 +262,100 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     );
   `);
 
-  const upstashUrl = (process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/+$/, '');
-  const upstashToken = process.env.UPSTASH_REDIS_REST_TOKEN || '';
-  const hasUpstash = Boolean(upstashUrl && upstashToken);
+  const parseHttpsUrl = (raw: string): URL | null => {
+    if (!raw || !raw.startsWith('https://')) return null;
+    try {
+      return new URL(raw);
+    } catch {
+      return null;
+    }
+  };
 
-  const supabaseUrl = (process.env.SUPABASE_URL || '').replace(/\/+$/, '');
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-  const hasSupabase = Boolean(supabaseUrl && supabaseKey);
+  const upstashUrl = (process.env.UPSTASH_REDIS_REST_URL || '').trim().replace(/\/+$/, '');
+  const upstashToken = (process.env.UPSTASH_REDIS_REST_TOKEN || '').trim();
+  const upstashParsed = parseHttpsUrl(upstashUrl);
+  const upstashConfigWarning = upstashUrl && !upstashParsed
+    ? 'UPSTASH_REDIS_REST_URL must be a valid https://...upstash.io REST API URL (not rediss:// TCP URL).'
+    : '';
+  const hasUpstash = Boolean(upstashParsed && upstashToken);
+  const upstashRedis: Redis | null = hasUpstash
+    ? new Redis({ url: upstashUrl, token: upstashToken })
+    : null;
+  const ratelimiters = new Map<string, Ratelimit>();
+  let upstashLastError: string | null = upstashConfigWarning || null;
+
+  const inspectSupabaseKeyRole = (key: string): string | null => {
+    if (!key) return null;
+    if (key.startsWith('sb_publishable_')) {
+      return 'You pasted a public sb_publishable_ key into SUPABASE_SERVICE_ROLE_KEY. Copy the server-only service_role or sb_secret_ key from Supabase Console → Project Settings → API Keys.';
+    }
+    const parts = key.split('.');
+    if (parts.length === 3 && key.startsWith('eyJ')) {
+      try {
+        const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+        const json = JSON.parse(Buffer.from(b64, 'base64').toString('utf8')) as { role?: string };
+        if (json.role && json.role !== 'service_role') {
+          return `You pasted a "${json.role}" JWT key into SUPABASE_SERVICE_ROLE_KEY. Use the server-only "service_role" secret key (with RLS bypass) from Supabase Console → Project Settings → API.`;
+        }
+      } catch {
+        // non-JWT or custom key format; let PostgREST validate it
+      }
+    }
+    return null;
+  };
+
+  const formatSupabaseError = (message: string, code?: string, status?: number): string => {
+    const rawErr = message || '';
+    const errCode = code || '';
+    const lower = rawErr.toLowerCase();
+    if (
+      errCode === 'PGRST205' ||
+      errCode === '42P01' ||
+      lower.includes('does not exist') ||
+      lower.includes('schema cache')
+    ) {
+      return 'Connected to Supabase project, but tables (order_archive / wallet_ledger_archive / catalog_snapshot) are missing. Paste supabase/schema.sql in Supabase Console → SQL Editor and click Run.';
+    }
+    if (errCode === '42501' || lower.includes('row-level security')) {
+      return 'Supabase RLS blocked the write (42501). Ensure SUPABASE_SERVICE_ROLE_KEY is set to the server-only service_role / sb_secret_ key (not anon / sb_publishable_), or re-run supabase/schema.sql.';
+    }
+    if (status === 401 || status === 403 || lower.includes('jwt') || lower.includes('invalid api key')) {
+      return 'Supabase rejected credentials. Verify SUPABASE_URL & SUPABASE_SERVICE_ROLE_KEY (service_role / sb_secret_).';
+    }
+    return rawErr || 'Unknown Supabase PostgREST error.';
+  };
+
+  const supabaseUrl = (
+    process.env.SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    process.env.VITE_SUPABASE_URL ||
+    ''
+  )
+    .trim()
+    .replace(/\/+$/, '');
+  const supabaseKey = (
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_SECRET_KEY ||
+    ''
+  ).trim();
+  const supabaseParsed = parseHttpsUrl(supabaseUrl);
+  const supabaseKeyWarning = inspectSupabaseKeyRole(supabaseKey);
+  const supabaseUrlWarning = !supabaseUrl
+    ? ''
+    : !supabaseParsed
+    ? 'SUPABASE_URL must be a valid https://<project-ref>.supabase.co Project URL (not a postgresql:// URI).'
+    : supabaseParsed.hostname === 'supabase.com' || supabaseParsed.pathname.length > 1
+    ? 'SUPABASE_URL should be your API Project URL (https://<project-ref>.supabase.co), not the dashboard URL.'
+    : '';
+  const supabaseConfigWarning = supabaseUrlWarning || supabaseKeyWarning || '';
+  const hasSupabase = Boolean(supabaseParsed && supabaseKey && !supabaseConfigWarning);
+  const supabase: SupabaseClient | null = hasSupabase
+    ? createClient(supabaseUrl, supabaseKey, {
+        auth: { persistSession: false, autoRefreshToken: false }
+      })
+    : null;
+  let supabaseLastError: string | null = supabaseConfigWarning || null;
+  let supabaseLastSyncAt: string | null = null;
 
   const r2Endpoint = (process.env.R2_ENDPOINT || '').replace(/\/+$/, '');
   const r2Bucket = process.env.R2_BUCKET || '';
@@ -578,26 +669,6 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     l1Cache.set(key, { value, expiresAt: Date.now() + ttlMs });
   };
 
-  const upstashCommand = async (args: Array<string | number>): Promise<unknown> => {
-    if (!hasUpstash) return null;
-    try {
-      const res = await fetch(upstashUrl, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${upstashToken}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(args),
-        signal: AbortSignal.timeout(1500)
-      });
-      if (!res.ok) return null;
-      const json = (await res.json()) as { result?: unknown };
-      return json.result ?? null;
-    } catch {
-      return null;
-    }
-  };
-
   const getCached = async <T>(key: string): Promise<{ value: T; tier: 'l1' | 'l2' } | null> => {
     if (dbControlConfig.l1CacheEnabled) {
       const l1 = getL1<T>(key);
@@ -607,19 +678,30 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
       }
     }
 
-    if (hasUpstash && dbControlConfig.l2CacheEnabled) {
-      const raw = await upstashCommand(['GET', key]);
-      if (typeof raw === 'string' && raw) {
-        try {
-          const parsed = JSON.parse(raw) as T;
+    if (upstashRedis && dbControlConfig.l2CacheEnabled) {
+      const start = performance.now();
+      try {
+        const raw = await upstashRedis.get<T | string>(key);
+        recordApiUsage('cloud-upstash-redis', {
+          latencyMs: performance.now() - start,
+          statusCode: 200,
+          cacheHit: raw !== null && raw !== undefined
+        });
+        upstashLastError = null;
+        if (raw !== null && raw !== undefined) {
+          const parsed = (typeof raw === 'string' ? JSON.parse(raw) : raw) as T;
           if (dbControlConfig.l1CacheEnabled) {
             setL1(key, parsed, 30_000);
           }
           cacheStats.l2Hits += 1;
           return { value: parsed, tier: 'l2' };
-        } catch {
-          // ignore corrupt L2 entry
         }
+      } catch (err) {
+        upstashLastError = err instanceof Error ? err.message : 'Upstash Redis GET failed';
+        recordApiUsage('cloud-upstash-redis', {
+          latencyMs: performance.now() - start,
+          statusCode: 503
+        });
       }
     }
 
@@ -631,17 +713,63 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     if (dbControlConfig.l1CacheEnabled) {
       setL1(key, value, ttlMs);
     }
-    if (hasUpstash && dbControlConfig.l2CacheEnabled) {
+    if (upstashRedis && dbControlConfig.l2CacheEnabled) {
       const ttlSec = Math.max(5, Math.round(ttlMs / 1000));
-      void upstashCommand(['SET', key, JSON.stringify(value), 'EX', ttlSec]);
+      const start = performance.now();
+      void upstashRedis
+        .set(key, value, { ex: ttlSec })
+        .then(() => {
+          upstashLastError = null;
+          recordApiUsage('cloud-upstash-redis', {
+            latencyMs: performance.now() - start,
+            statusCode: 200
+          });
+        })
+        .catch((err) => {
+          upstashLastError = err instanceof Error ? err.message : 'Upstash Redis SET failed';
+          recordApiUsage('cloud-upstash-redis', {
+            latencyMs: performance.now() - start,
+            statusCode: 503
+          });
+        });
     }
   };
 
   const invalidateKey = async (key: string): Promise<void> => {
     l1Cache.delete(key);
-    if (hasUpstash) {
-      await upstashCommand(['DEL', key]);
+    if (upstashRedis) {
+      const start = performance.now();
+      try {
+        await upstashRedis.del(key);
+        upstashLastError = null;
+        recordApiUsage('cloud-upstash-redis', {
+          latencyMs: performance.now() - start,
+          statusCode: 200
+        });
+      } catch (err) {
+        upstashLastError = err instanceof Error ? err.message : 'Upstash Redis DEL failed';
+        recordApiUsage('cloud-upstash-redis', {
+          latencyMs: performance.now() - start,
+          statusCode: 503
+        });
+      }
     }
+  };
+
+  const getOrCreateRatelimiter = (bucket: string, maxRequests: number, windowSeconds: number): Ratelimit | null => {
+    if (!upstashRedis) return null;
+    const rlKey = `${bucket}:${maxRequests}:${windowSeconds}`;
+    let limiter = ratelimiters.get(rlKey);
+    if (!limiter) {
+      limiter = new Ratelimit({
+        redis: upstashRedis,
+        limiter: Ratelimit.slidingWindow(maxRequests, `${windowSeconds} s`),
+        prefix: `fv:rl:${bucket}`,
+        analytics: false
+      });
+      ratelimiters.set(rlKey, limiter);
+    }
+    return limiter;
   };
 
   const checkRateLimit = async (
@@ -653,31 +781,31 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     const windowSlot = Math.floor(Date.now() / (windowSeconds * 1000));
     const key = `rl:${bucket}:${ip}:${windowSlot}`;
 
-    if (hasUpstash && dbControlConfig.l2CacheEnabled) {
+    if (upstashRedis && dbControlConfig.l2CacheEnabled) {
+      const start = performance.now();
       try {
-        const res = await fetch(`${upstashUrl}/pipeline`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${upstashToken}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify([
-            ['INCR', key],
-            ['EXPIRE', key, windowSeconds]
-          ]),
-          signal: AbortSignal.timeout(1200)
-        });
-        if (res.ok) {
-          const data = (await res.json()) as Array<{ result?: number }>;
-          const count = Number(data[0]?.result || 1);
+        const limiter = getOrCreateRatelimiter(bucket, maxRequests, windowSeconds);
+        if (limiter) {
+          const res = await limiter.limit(ip);
+          upstashLastError = null;
+          recordApiUsage('cloud-upstash-redis', {
+            latencyMs: performance.now() - start,
+            statusCode: res.success ? 200 : 429,
+            rateLimited: !res.success
+          });
           return {
-            allowed: count <= maxRequests,
-            remaining: Math.max(0, maxRequests - count),
-            resetSeconds: windowSeconds
+            allowed: res.success,
+            remaining: Math.max(0, res.remaining),
+            resetSeconds: Math.max(1, Math.ceil((res.reset - Date.now()) / 1000))
           };
         }
-      } catch {
-        // Fallback to L1 sliding counter
+      } catch (err) {
+        upstashLastError = err instanceof Error ? err.message : 'Upstash Ratelimit check failed';
+        recordApiUsage('cloud-upstash-redis', {
+          latencyMs: performance.now() - start,
+          statusCode: 503
+        });
+        // Graceful fallback to L1 sliding counter below
       }
     }
 
@@ -1020,11 +1148,18 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     }
 
     // Upstash-First or Auto Multi-Cloud Mode
-    if (mode === 'upstash' && hasUpstash && dbControlConfig.l2CacheEnabled) {
-      const raw = await upstashCommand(['GET', cacheKey]);
-      if (typeof raw === 'string' && raw) {
-        try {
-          const parsed = JSON.parse(raw) as Partial<CatalogBootstrapPayload>;
+    if (mode === 'upstash' && upstashRedis && dbControlConfig.l2CacheEnabled) {
+      const uStart = performance.now();
+      try {
+        const raw = await upstashRedis.get<CatalogBootstrapPayload | string>(cacheKey);
+        recordApiUsage('cloud-upstash-redis', {
+          latencyMs: performance.now() - uStart,
+          statusCode: 200,
+          cacheHit: raw !== null && raw !== undefined
+        });
+        upstashLastError = null;
+        if (raw !== null && raw !== undefined) {
+          const parsed = (typeof raw === 'string' ? JSON.parse(raw) : raw) as Partial<CatalogBootstrapPayload>;
           cacheStats.l2Hits += 1;
           return {
             products: Array.isArray(parsed.products) ? parsed.products : [],
@@ -1034,9 +1169,13 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
             source: 'upstash-l2',
             generatedAt: parsed.generatedAt || new Date().toISOString()
           };
-        } catch {
-          // fall through
         }
+      } catch (err) {
+        upstashLastError = err instanceof Error ? err.message : 'Upstash GET failed';
+        recordApiUsage('cloud-upstash-redis', {
+          latencyMs: performance.now() - uStart,
+          statusCode: 503
+        });
       }
       if (!dbControlConfig.autoFailoverEnabled) {
         return {
@@ -1096,6 +1235,9 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
           city = excluded.city,
+          total = excluded.total,
+          item_count = excluded.item_count,
+          payment_method = excluded.payment_method,
           order_date = excluded.order_date,
           status = excluded.status,
           payment_status = excluded.payment_status,
@@ -1116,30 +1258,44 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
         now
       );
 
-    if (hasSupabase && dbControlConfig.archivalSyncEnabled) {
-      void fetch(`${supabaseUrl}/rest/v1/order_archive`, {
-        method: 'POST',
-        headers: {
-          apikey: supabaseKey,
-          Authorization: `Bearer ${supabaseKey}`,
-          'Content-Type': 'application/json',
-          Prefer: 'resolution=merge-duplicates'
-        },
-        body: JSON.stringify({
-          id: order.id,
-          user_id: order.userId,
-          city: order.city,
-          total: Math.round(order.total),
-          status: order.status,
-          payment_method: order.paymentMethod,
-          payment_status: order.paymentStatus,
-          assigned_to_uid: order.assignedToUid,
-          item_count: Math.max(0, Math.round(order.itemCount)),
-          order_date: order.date,
-          updated_at: now
-        }),
-        signal: AbortSignal.timeout(2500)
-      }).catch(() => undefined);
+    if (supabase && dbControlConfig.archivalSyncEnabled) {
+      const sStart = performance.now();
+      void (async () => {
+        try {
+          const { error, status } = await supabase.from('order_archive').upsert(
+            {
+              id: order.id,
+              user_id: order.userId,
+              city: order.city,
+              total: Math.round(order.total),
+              status: order.status,
+              payment_method: order.paymentMethod,
+              payment_status: order.paymentStatus,
+              assigned_to_uid: order.assignedToUid,
+              item_count: Math.max(0, Math.round(order.itemCount)),
+              order_date: order.date,
+              updated_at: now
+            },
+            { onConflict: 'id' }
+          );
+          recordApiUsage('cloud-supabase-postgres', {
+            latencyMs: performance.now() - sStart,
+            statusCode: error ? 500 : 200
+          });
+          if (error) {
+            supabaseLastError = formatSupabaseError(error.message, error.code, status);
+          } else {
+            supabaseLastError = null;
+            supabaseLastSyncAt = new Date().toISOString();
+          }
+        } catch (err) {
+          supabaseLastError = err instanceof Error ? err.message : 'Supabase upsert failed';
+          recordApiUsage('cloud-supabase-postgres', {
+            latencyMs: performance.now() - sStart,
+            statusCode: 503
+          });
+        }
+      })();
     }
   };
 
@@ -1152,27 +1308,373 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
       )
       .run(entry.id, entry.partnerUid, entry.orderId, entry.type, Math.round(entry.amount), now);
 
-    if (hasSupabase && dbControlConfig.archivalSyncEnabled) {
-      void fetch(`${supabaseUrl}/rest/v1/wallet_ledger_archive`, {
-        method: 'POST',
-        headers: {
-          apikey: supabaseKey,
-          Authorization: `Bearer ${supabaseKey}`,
-          'Content-Type': 'application/json',
-          Prefer: 'resolution=ignore-duplicates'
-        },
-        body: JSON.stringify({
-          id: entry.id,
-          partner_uid: entry.partnerUid,
-          order_id: entry.orderId,
-          type: entry.type,
-          amount: Math.round(entry.amount),
-          created_at: now
-        }),
-        signal: AbortSignal.timeout(2500)
-      }).catch(() => undefined);
+    if (supabase && dbControlConfig.archivalSyncEnabled) {
+      const sStart = performance.now();
+      void (async () => {
+        try {
+          const { error, status } = await supabase.from('wallet_ledger_archive').upsert(
+            {
+              id: entry.id,
+              partner_uid: entry.partnerUid,
+              order_id: entry.orderId,
+              type: entry.type,
+              amount: Math.round(entry.amount),
+              created_at: now
+            },
+            { onConflict: 'id', ignoreDuplicates: true }
+          );
+          recordApiUsage('cloud-supabase-postgres', {
+            latencyMs: performance.now() - sStart,
+            statusCode: error ? 500 : 200
+          });
+          if (error) {
+            supabaseLastError = formatSupabaseError(error.message, error.code, status);
+          } else {
+            supabaseLastError = null;
+            supabaseLastSyncAt = new Date().toISOString();
+          }
+        } catch (err) {
+          supabaseLastError = err instanceof Error ? err.message : 'Supabase ledger upsert failed';
+          recordApiUsage('cloud-supabase-postgres', {
+            latencyMs: performance.now() - sStart,
+            statusCode: 503
+          });
+        }
+      })();
     }
   };
+
+  // Backfill historical Firestore orders & wallet ledger into SQLite WAL when an admin triggers sync
+  const backfillFirestoreToSqlite = async (adminIdToken: string): Promise<void> => {
+    const projectId = firebaseMeta.projectId;
+    const databaseId = firebaseMeta.firestoreDatabaseId || '(default)';
+    if (!projectId || !adminIdToken) return;
+
+    const base = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+      projectId
+    )}/databases/${encodeURIComponent(databaseId)}/documents`;
+    const apiKeyParam = firebaseMeta.apiKey ? `?key=${encodeURIComponent(firebaseMeta.apiKey)}` : '';
+
+    try {
+      const [ordersRes, ledgerRes] = await Promise.all([
+        fetch(`${base}/orders${apiKeyParam}${apiKeyParam ? '&' : '?'}pageSize=500`, {
+          headers: { Authorization: `Bearer ${adminIdToken}` },
+          signal: AbortSignal.timeout(6000)
+        }),
+        fetch(`${base}/walletLedger${apiKeyParam}${apiKeyParam ? '&' : '?'}pageSize=500`, {
+          headers: { Authorization: `Bearer ${adminIdToken}` },
+          signal: AbortSignal.timeout(6000)
+        })
+      ]);
+
+      const upsertOrderStmt = sqlite.prepare(`
+        INSERT INTO order_archive
+          (id, user_id, city, total, status, payment_method, payment_status, assigned_to_uid, item_count, order_date, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          city = excluded.city,
+          total = excluded.total,
+          item_count = excluded.item_count,
+          payment_method = excluded.payment_method,
+          order_date = excluded.order_date,
+          status = excluded.status,
+          payment_status = excluded.payment_status,
+          assigned_to_uid = excluded.assigned_to_uid,
+          updated_at = excluded.updated_at
+        WHERE excluded.updated_at >= order_archive.updated_at
+      `);
+
+      const upsertLedgerStmt = sqlite.prepare(`
+        INSERT OR IGNORE INTO wallet_ledger_archive
+          (id, partner_uid, order_id, type, amount, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+
+      const orderDocs: Array<Record<string, unknown>> = [];
+      if (ordersRes.ok) {
+        const data = (await ordersRes.json()) as {
+          documents?: Array<{ name?: string; fields?: Record<string, unknown> }>;
+        };
+        if (Array.isArray(data.documents)) {
+          for (const doc of data.documents) {
+            orderDocs.push(decodeFirestoreDoc(doc));
+          }
+        }
+      }
+
+      const ledgerDocs: Array<Record<string, unknown>> = [];
+      if (ledgerRes.ok) {
+        const data = (await ledgerRes.json()) as {
+          documents?: Array<{ name?: string; fields?: Record<string, unknown> }>;
+        };
+        if (Array.isArray(data.documents)) {
+          for (const doc of data.documents) {
+            ledgerDocs.push(decodeFirestoreDoc(doc));
+          }
+        }
+      }
+
+      if (orderDocs.length > 0 || ledgerDocs.length > 0) {
+        const now = Date.now();
+        const tx = sqlite.transaction(() => {
+          for (const o of orderDocs) {
+            const oid = String(o.id || o.__docId || '').trim();
+            const uid = String(o.userId || '').trim();
+            if (!oid || !uid) continue;
+            const addr = (o.address && typeof o.address === 'object' ? o.address : {}) as Record<string, unknown>;
+            const items = Array.isArray(o.items) ? o.items : [];
+            const dateStr = String(o.date || o.createdAt || new Date().toISOString());
+            const ts = Date.parse(dateStr);
+            upsertOrderStmt.run(
+              oid,
+              uid,
+              String(addr.city || o.city || ''),
+              Math.round(Number(o.total || 0)),
+              String(o.status || 'placed'),
+              String(o.paymentMethod || 'cod'),
+              String(o.paymentStatus || 'pending'),
+              String(o.assignedToUid || ''),
+              items.length,
+              dateStr,
+              Number.isFinite(ts) ? ts : now
+            );
+          }
+          for (const l of ledgerDocs) {
+            const lid = String(l.id || l.__docId || '').trim();
+            const puid = String(l.partnerUid || '').trim();
+            if (!lid || !puid) continue;
+            const ts = typeof l.createdAt === 'string' ? Date.parse(l.createdAt) : Number(l.createdAt || now);
+            upsertLedgerStmt.run(
+              lid,
+              puid,
+              String(l.orderId || ''),
+              String(l.type || 'trip_credit'),
+              Math.round(Number(l.amount || 0)),
+              Number.isFinite(ts) ? ts : now
+            );
+          }
+        });
+        tx();
+      }
+    } catch {
+      // non-blocking backfill
+    }
+  };
+
+  // Bidirectional sync between local SQLite WAL and Supabase PostgreSQL
+  const syncBidirectionalWithSupabase = async (adminIdToken?: string): Promise<{
+    ok: boolean;
+    pushedOrders: number;
+    pushedLedger: number;
+    pulledOrders: number;
+    pulledLedger: number;
+    error?: string;
+  }> => {
+    if (!supabase) {
+      return {
+        ok: false,
+        pushedOrders: 0,
+        pushedLedger: 0,
+        pulledOrders: 0,
+        pulledLedger: 0,
+        error:
+          supabaseConfigWarning ||
+          'Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.'
+      };
+    }
+
+    const sStart = performance.now();
+    try {
+      if (adminIdToken) {
+        await backfillFirestoreToSqlite(adminIdToken);
+      }
+
+      const localOrders = sqlite
+        .prepare(
+          `SELECT id, user_id, city, total, status, payment_method, payment_status, assigned_to_uid, item_count, order_date, updated_at
+           FROM order_archive
+           LIMIT 1000`
+        )
+        .all() as Array<Record<string, unknown>>;
+
+      const localLedger = sqlite
+        .prepare(
+          `SELECT id, partner_uid, order_id, type, amount, created_at
+           FROM wallet_ledger_archive
+           LIMIT 1000`
+        )
+        .all() as Array<Record<string, unknown>>;
+
+      const localSnapRow = sqlite
+        .prepare('SELECT id, payload, updated_at FROM catalog_snapshot WHERE id = ?')
+        .get('storefront') as { id?: string; payload?: string; updated_at?: number } | undefined;
+
+      if (localOrders.length > 0) {
+        const { error, status } = await supabase
+          .from('order_archive')
+          .upsert(localOrders, { onConflict: 'id' });
+        if (error) throw new Error(formatSupabaseError(error.message, error.code, status));
+      }
+
+      if (localLedger.length > 0) {
+        const { error, status } = await supabase
+          .from('wallet_ledger_archive')
+          .upsert(localLedger, { onConflict: 'id', ignoreDuplicates: true });
+        if (error) throw new Error(formatSupabaseError(error.message, error.code, status));
+      }
+
+      if (localSnapRow?.payload) {
+        let parsedSnap: unknown = null;
+        try {
+          parsedSnap = JSON.parse(localSnapRow.payload);
+        } catch {
+          parsedSnap = null;
+        }
+        if (parsedSnap) {
+          const { error, status } = await supabase.from('catalog_snapshot').upsert(
+            {
+              id: 'storefront',
+              payload: parsedSnap,
+              updated_at: Number(localSnapRow.updated_at || Date.now())
+            },
+            { onConflict: 'id' }
+          );
+          if (error) throw new Error(formatSupabaseError(error.message, error.code, status));
+        }
+      }
+
+      const [remoteOrdersRes, remoteLedgerRes] = await Promise.all([
+        supabase
+          .from('order_archive')
+          .select('id, user_id, city, total, status, payment_method, payment_status, assigned_to_uid, item_count, order_date, updated_at')
+          .order('updated_at', { ascending: false })
+          .limit(1000),
+        supabase
+          .from('wallet_ledger_archive')
+          .select('id, partner_uid, order_id, type, amount, created_at')
+          .order('created_at', { ascending: false })
+          .limit(1000)
+      ]);
+
+      if (remoteOrdersRes.error) {
+        throw new Error(
+          formatSupabaseError(
+            remoteOrdersRes.error.message,
+            remoteOrdersRes.error.code,
+            remoteOrdersRes.status
+          )
+        );
+      }
+      if (remoteLedgerRes.error) {
+        throw new Error(
+          formatSupabaseError(
+            remoteLedgerRes.error.message,
+            remoteLedgerRes.error.code,
+            remoteLedgerRes.status
+          )
+        );
+      }
+
+      const remoteOrders = remoteOrdersRes.data || [];
+      const remoteLedger = remoteLedgerRes.data || [];
+
+      const upsertOrderStmt = sqlite.prepare(`
+        INSERT INTO order_archive
+          (id, user_id, city, total, status, payment_method, payment_status, assigned_to_uid, item_count, order_date, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          city = excluded.city,
+          total = excluded.total,
+          item_count = excluded.item_count,
+          payment_method = excluded.payment_method,
+          order_date = excluded.order_date,
+          status = excluded.status,
+          payment_status = excluded.payment_status,
+          assigned_to_uid = excluded.assigned_to_uid,
+          updated_at = excluded.updated_at
+        WHERE excluded.updated_at >= order_archive.updated_at
+      `);
+
+      const upsertLedgerStmt = sqlite.prepare(`
+        INSERT OR IGNORE INTO wallet_ledger_archive
+          (id, partner_uid, order_id, type, amount, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+
+      const tx = sqlite.transaction(() => {
+        for (const o of remoteOrders) {
+          upsertOrderStmt.run(
+            String(o.id),
+            String(o.user_id || ''),
+            String(o.city || ''),
+            Number(o.total || 0),
+            String(o.status || 'placed'),
+            String(o.payment_method || 'cod'),
+            String(o.payment_status || 'pending'),
+            String(o.assigned_to_uid || ''),
+            Number(o.item_count || 0),
+            String(o.order_date || ''),
+            Number(o.updated_at || Date.now())
+          );
+        }
+        for (const l of remoteLedger) {
+          upsertLedgerStmt.run(
+            String(l.id),
+            String(l.partner_uid || ''),
+            String(l.order_id || ''),
+            String(l.type || 'trip_credit'),
+            Number(l.amount || 0),
+            Number(l.created_at || Date.now())
+          );
+        }
+      });
+      tx();
+
+      recordApiUsage('cloud-supabase-postgres', {
+        latencyMs: performance.now() - sStart,
+        statusCode: 200
+      });
+      supabaseLastError = null;
+      supabaseLastSyncAt = new Date().toISOString();
+
+      return {
+        ok: true,
+        pushedOrders: localOrders.length,
+        pushedLedger: localLedger.length,
+        pulledOrders: remoteOrders.length,
+        pulledLedger: remoteLedger.length
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Supabase sync failed';
+      supabaseLastError = msg;
+      recordApiUsage('cloud-supabase-postgres', {
+        latencyMs: performance.now() - sStart,
+        statusCode: 500
+      });
+      return {
+        ok: false,
+        pushedOrders: 0,
+        pushedLedger: 0,
+        pulledOrders: 0,
+        pulledLedger: 0,
+        error: msg
+      };
+    }
+  };
+
+  // Auto-hydrate cold container SQLite WAL from Supabase Postgres archive on boot
+  if (supabase) {
+    try {
+      const localCount = Number(
+        (sqlite.prepare('SELECT COUNT(*) AS c FROM order_archive').get() as { c?: number })?.c || 0
+      );
+      if (localCount === 0) {
+        void syncBidirectionalWithSupabase();
+      }
+    } catch {
+      // non-fatal
+    }
+  }
 
   const getSqlAnalyticsSummary = (): SqlAnalyticsSummary => {
     const totals = sqlite
@@ -1441,34 +1943,65 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     });
 
     // 3. Supabase PostgreSQL
-    let supaStatus: 'connected' | 'degraded' | 'standby' = hasSupabase ? 'degraded' : 'standby';
+    let supaStatus: 'connected' | 'degraded' | 'standby' = supabase
+      ? 'degraded'
+      : supabaseConfigWarning
+      ? 'degraded'
+      : 'standby';
     let supaLatency: number | null = null;
-    let supaRows: number | null = null;
-    if (hasSupabase) {
+    let supaOrderRows: number | null = null;
+    let supaLedgerRows: number | null = null;
+    let supaNote: string | null = supabaseConfigWarning || supabaseLastError;
+
+    if (supabase) {
       const sStart = performance.now();
       try {
-        const res = await fetch(`${supabaseUrl}/rest/v1/order_archive?select=id&limit=1`, {
-          headers: {
-            apikey: supabaseKey,
-            Authorization: `Bearer ${supabaseKey}`,
-            Prefer: 'count=exact'
-          },
-          signal: AbortSignal.timeout(3000)
-        });
+        const [ordersProbe, ledgerProbe, catalogProbe] = await Promise.all([
+          supabase.from('order_archive').select('id', { count: 'exact', head: true }),
+          supabase.from('wallet_ledger_archive').select('id', { count: 'exact', head: true }),
+          supabase.from('catalog_snapshot').select('id', { count: 'exact', head: true })
+        ]);
         supaLatency = Math.round(performance.now() - sStart);
-        if (res.ok) {
-          supaStatus = 'connected';
-          const range = res.headers.get('content-range');
-          if (range && range.includes('/')) {
-            const countVal = Number(range.split('/')[1]);
-            if (Number.isFinite(countVal)) supaRows = countVal;
+        const firstProbeErr = ordersProbe.error || ledgerProbe.error || catalogProbe.error;
+        const firstProbeStatus = ordersProbe.error
+          ? ordersProbe.status
+          : ledgerProbe.error
+          ? ledgerProbe.status
+          : catalogProbe.status;
+        recordApiUsage('cloud-supabase-postgres', {
+          latencyMs: supaLatency,
+          statusCode: firstProbeErr ? 500 : 200
+        });
+        if (!firstProbeErr) {
+          supaOrderRows = typeof ordersProbe.count === 'number' ? ordersProbe.count : 0;
+          supaLedgerRows = typeof ledgerProbe.count === 'number' ? ledgerProbe.count : 0;
+          if (supabaseLastError && !supabaseLastError.includes('tables')) {
+            // Preserve recent write/RLS error until resolved by a successful sync
+            supaStatus = 'degraded';
+            supaNote = supabaseLastError;
+          } else {
+            supaStatus = 'connected';
+            supaNote = null;
+            supabaseLastError = null;
           }
+        } else {
+          supaNote = formatSupabaseError(
+            firstProbeErr.message || '',
+            firstProbeErr.code,
+            firstProbeStatus
+          );
+          supabaseLastError = supaNote;
         }
-      } catch {
+      } catch (err) {
         supaLatency = Math.round(performance.now() - sStart);
         supaStatus = 'degraded';
+        supaNote = err instanceof Error ? err.message : 'Unable to reach Supabase PostgREST API.';
+        supabaseLastError = supaNote;
       }
     }
+
+    const supaTotalRows =
+      supaOrderRows !== null ? supaOrderRows + (supaLedgerRows || 0) : null;
 
     entries.push({
       id: 'supabase',
@@ -1480,42 +2013,66 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
       usedBytes: null,
       freeTierLimitBytes: SUPABASE_FREE_BYTES,
       balanceBytes: SUPABASE_FREE_BYTES,
-      recordCount: supaRows,
+      recordCount: supaTotalRows,
       usageLabel: hasSupabase
-        ? supaRows !== null
-          ? `${supaRows} archived SQL rows (DB bytes metered in Supabase dashboard)`
-          : 'Connected via PostgREST'
+        ? supaTotalRows !== null
+          ? `${supaOrderRows} orders + ${supaLedgerRows} ledger rows`
+          : 'Probe failed — check note below'
         : 'Standby (Set SUPABASE_URL & SUPABASE_SERVICE_ROLE_KEY in .env)',
       balanceLabel: '500.00 MB Postgres Free Tier',
+      statusNote: supaNote,
       details: {
         configured: hasSupabase,
         archivalSyncEnabled: dbControlConfig.archivalSyncEnabled,
-        endpoint: hasSupabase ? supabaseUrl : 'Not configured'
+        endpoint: hasSupabase ? supabaseUrl : 'Not configured',
+        lastSyncAt: supabaseLastSyncAt || 'Not synced yet'
       }
     });
 
     // 4. Upstash Redis L2 Cache
-    let upStatus: 'connected' | 'degraded' | 'standby' = hasUpstash ? 'degraded' : 'standby';
+    let upStatus: 'connected' | 'degraded' | 'standby' = upstashRedis
+      ? 'degraded'
+      : upstashConfigWarning
+      ? 'degraded'
+      : 'standby';
     let upLatency: number | null = null;
     let upKeyCount: number | null = null;
-    if (hasUpstash) {
+    let upNote: string | null = upstashConfigWarning || upstashLastError;
+
+    if (upstashRedis) {
       const uStart = performance.now();
       try {
-        const dbSize = await upstashCommand(['DBSIZE']);
+        const [, dbSize] = await Promise.all([upstashRedis.ping(), upstashRedis.dbsize()]);
         upLatency = Math.round(performance.now() - uStart);
-        if (dbSize !== null && Number.isFinite(Number(dbSize))) {
+        recordApiUsage('cloud-upstash-redis', {
+          latencyMs: upLatency,
+          statusCode: 200
+        });
+        if (Number.isFinite(Number(dbSize))) {
           upStatus = 'connected';
           upKeyCount = Number(dbSize);
+          upNote = null;
+          upstashLastError = null;
         }
-      } catch {
+      } catch (err) {
         upLatency = Math.round(performance.now() - uStart);
+        const msg = err instanceof Error ? err.message : 'Upstash probe failed';
+        upNote =
+          msg.toLowerCase().includes('unauthorized') || msg.toLowerCase().includes('wrongpass')
+            ? 'Upstash rejected token. Copy UPSTASH_REDIS_REST_URL & UPSTASH_REDIS_REST_TOKEN from Upstash Console → REST API.'
+            : msg;
+        upstashLastError = upNote;
+        recordApiUsage('cloud-upstash-redis', {
+          latencyMs: upLatency,
+          statusCode: 503
+        });
       }
     }
 
     entries.push({
       id: 'upstash',
       name: 'Upstash Redis L2 Cache',
-      role: 'Distributed Catalog Cache & Edge Sliding Rate Limiter',
+      role: 'Distributed Catalog Cache & Sliding-Window Rate Limiter',
       provider: 'Upstash Serverless Redis Free Tier (256 MB)',
       status: upStatus,
       latencyMs: upLatency,
@@ -1526,11 +2083,13 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
       usageLabel: hasUpstash
         ? upKeyCount !== null
           ? `${upKeyCount} active keys (L1 RAM: ${l1Cache.size} entries)`
-          : 'Connected'
+          : 'Probe failed — check note below'
         : `Standby — L1 Memory Cache active (${l1Cache.size} entries)`,
       balanceLabel: '256.00 MB / 500K Monthly Commands Free Tier',
+      statusNote: upNote,
       details: {
         configured: hasUpstash,
+        endpoint: hasUpstash ? upstashUrl : 'Not configured',
         l1Entries: l1Cache.size,
         l1Hits: cacheStats.l1Hits,
         l2Hits: cacheStats.l2Hits,
@@ -1641,7 +2200,7 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     };
   };
 
-  const runDatabaseAction = async (action: string) => {
+  const runDatabaseAction = async (action: string, adminIdToken?: string) => {
     if (action === 'sync-snapshot') {
       const fresh = await fetchPublicCatalogFromFirestore();
       if (!fresh) {
@@ -1665,13 +2224,34 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     if (action === 'purge-cache') {
       const clearedL1 = l1Cache.size;
       l1Cache.clear();
-      if (hasUpstash) {
-        await upstashCommand(['DEL', 'catalog:bootstrap:v1']);
+      if (upstashRedis) {
+        try {
+          await upstashRedis.del('catalog:bootstrap:v1');
+          upstashLastError = null;
+        } catch (err) {
+          upstashLastError = err instanceof Error ? err.message : 'Upstash DEL failed';
+        }
       }
       return {
         ok: true,
         action,
-        message: `Purged ${clearedL1} L1 memory cache entries${hasUpstash ? ' and Upstash catalog key' : ''}.`
+        message: `Purged ${clearedL1} L1 memory cache entries${upstashRedis ? ' and Upstash catalog key' : ''}.`
+      };
+    }
+
+    if (action === 'sync-supabase') {
+      const result = await syncBidirectionalWithSupabase(adminIdToken);
+      if (!result.ok) {
+        return {
+          ok: false,
+          error: result.error || 'Supabase bidirectional sync failed.'
+        };
+      }
+      return {
+        ok: true,
+        action,
+        message: `Synced with Supabase Postgres: pushed ${result.pushedOrders} orders / ${result.pushedLedger} ledger rows, pulled ${result.pulledOrders} orders / ${result.pulledLedger} ledger rows.`,
+        ...result
       };
     }
 
@@ -1929,6 +2509,32 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
         dailyQuota: quotas.authDailyQuota as number | null,
         cacheTtl: '60s Admin Token Cache',
         description: 'Handles SMS OTP verification, Google OAuth, and backend Admin token verification.'
+      },
+      {
+        id: 'cloud-upstash-redis',
+        group: 'Connected Cloud APIs',
+        method: 'POST',
+        path: upstashParsed ? `Upstash Redis REST (${upstashParsed.hostname})` : 'Upstash Redis REST (Standby)',
+        targetUrl: upstashUrl || '',
+        auth: 'UPSTASH_REDIS_REST_TOKEN',
+        rateLimit: '500K commands / month (Free Tier)',
+        perMinLimit: null as number | null,
+        dailyQuota: quotas.upstashDailyQuota as number | null,
+        cacheTtl: `${ttls.catalogTtlSeconds}s L2 TTL`,
+        description: 'Distributed L2 catalog cache and sliding-window API rate limiter.'
+      },
+      {
+        id: 'cloud-supabase-postgres',
+        group: 'Connected Cloud APIs',
+        method: 'POST',
+        path: supabaseParsed ? `Supabase PostgREST (${supabaseParsed.hostname})` : 'Supabase PostgreSQL (Standby)',
+        targetUrl: supabaseUrl || '',
+        auth: 'SUPABASE_SERVICE_ROLE_KEY',
+        rateLimit: '500 MB DB / Unlimited API Requests',
+        perMinLimit: null as number | null,
+        dailyQuota: quotas.serverDailyQuota as number | null,
+        cacheTtl: 'Persistent Relational SQL',
+        description: 'Long-term PostgreSQL archival warehouse for order_archive and wallet_ledger_archive.'
       }
     ];
 
@@ -2098,6 +2704,90 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     for (const node of serverControlConfig.serverNodes) {
       const nodeHealth = node.url ? `${node.url.replace(/\/+$/, '')}/api/health` : `http://127.0.0.1:${port}/api/health`;
       allowedMap.set(node.id, nodeHealth);
+    }
+
+    if (target === 'cloud-upstash-redis') {
+      if (!upstashRedis) {
+        return {
+          ok: false,
+          status: 400,
+          latencyMs: 0,
+          error: upstashConfigWarning || 'UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN are not set.'
+        };
+      }
+      const start = performance.now();
+      try {
+        const pong = await upstashRedis.ping();
+        const latencyMs = Math.round(performance.now() - start);
+        recordApiUsage('cloud-upstash-redis', { latencyMs, statusCode: 200 });
+        upstashLastError = null;
+        return {
+          ok: true,
+          status: 200,
+          latencyMs,
+          cacheHeader: `PING=${String(pong)}`
+        };
+      } catch (err) {
+        const latencyMs = Math.round(performance.now() - start);
+        const msg = err instanceof Error ? err.message : 'Upstash ping failed';
+        upstashLastError = msg;
+        recordApiUsage('cloud-upstash-redis', { latencyMs, statusCode: 503 });
+        return {
+          ok: false,
+          status: 503,
+          latencyMs,
+          error: msg
+        };
+      }
+    }
+
+    if (target === 'cloud-supabase-postgres') {
+      if (!supabase) {
+        return {
+          ok: false,
+          status: 400,
+          latencyMs: 0,
+          error: supabaseConfigWarning || 'SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are not set.'
+        };
+      }
+      const start = performance.now();
+      try {
+        const { error, count } = await supabase
+          .from('order_archive')
+          .select('id', { count: 'exact', head: true });
+        const latencyMs = Math.round(performance.now() - start);
+        recordApiUsage('cloud-supabase-postgres', {
+          latencyMs,
+          statusCode: error ? 500 : 200
+        });
+        if (error) {
+          supabaseLastError = error.message;
+          return {
+            ok: false,
+            status: 500,
+            latencyMs,
+            error: error.message
+          };
+        }
+        supabaseLastError = null;
+        return {
+          ok: true,
+          status: 200,
+          latencyMs,
+          cacheHeader: `order_archive=${count ?? 0}`
+        };
+      } catch (err) {
+        const latencyMs = Math.round(performance.now() - start);
+        const msg = err instanceof Error ? err.message : 'Supabase probe failed';
+        supabaseLastError = msg;
+        recordApiUsage('cloud-supabase-postgres', { latencyMs, statusCode: 503 });
+        return {
+          ok: false,
+          status: 503,
+          latencyMs,
+          error: msg
+        };
+      }
     }
 
     const resolvedUrl = allowedMap.get(target);

@@ -27,6 +27,7 @@ interface DatabaseStorageEntry {
   recordCount: number | null;
   usageLabel: string;
   balanceLabel: string;
+  statusNote?: string | null;
   details: Record<string, string | number | boolean | null>;
 }
 
@@ -110,7 +111,9 @@ export const DatabaseControlCenter: React.FC = () => {
     }
   };
 
-  const handleRunAction = async (action: 'sync-snapshot' | 'purge-cache' | 'checkpoint-sqlite') => {
+  const handleRunAction = async (
+    action: 'sync-snapshot' | 'purge-cache' | 'checkpoint-sqlite' | 'sync-supabase'
+  ) => {
     if (!firebaseUser) return;
     setRunningAction(action);
     try {
@@ -357,6 +360,17 @@ export const DatabaseControlCenter: React.FC = () => {
                 ? 'Checkpointing...'
                 : 'Run SQLite WAL Checkpoint'}
             </button>
+            <button
+              type="button"
+              disabled={runningAction !== null}
+              onClick={() => void handleRunAction('sync-supabase')}
+              className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-bold px-3.5 py-2 rounded-xl flex items-center gap-1.5"
+            >
+              <ArrowRightLeft size={14} />
+              {runningAction === 'sync-supabase'
+                ? 'Syncing Supabase...'
+                : 'Sync Archive ↔ Supabase Postgres'}
+            </button>
           </div>
         </form>
       )}
@@ -447,6 +461,12 @@ export const DatabaseControlCenter: React.FC = () => {
                       </div>
                     )}
                   </div>
+                  {dbEntry.statusNote && (
+                    <div className="mt-3 p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-[11px] text-amber-800 flex items-start gap-2">
+                      <AlertTriangle size={14} className="shrink-0 mt-0.5 text-amber-600" />
+                      <span>{dbEntry.statusNote}</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Measured Details */}
