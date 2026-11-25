@@ -25,6 +25,8 @@ interface ServerNodeConfig {
   url: string;
   region: string;
   role: 'primary' | 'secondary' | 'edge-worker';
+  tier?: 'primary' | 'backup';
+  freeUnlimited?: boolean;
   enabled: boolean;
   priority: number;
 }
@@ -54,6 +56,7 @@ interface ServerControlConfig {
   };
   dailyQuotas: ServerDailyQuotas;
   autoServerFailover: boolean;
+  unlimitedFreeMode?: boolean;
   updatedAt: string;
 }
 
@@ -61,7 +64,9 @@ interface NodeQuotaDetail {
   nodeId: string;
   label: string;
   role: string;
+  tier?: string;
   enabled: boolean;
+  isUnlimited?: boolean;
   quotaTier: string;
   dailyQuota: number;
   usedToday: number;
@@ -78,6 +83,7 @@ interface ServerQuotaSummary {
   protectedRemainingThisMin: number;
   serverThrottledToday: number;
   serverErrorsToday: number;
+  unlimitedFreeMode?: boolean;
   cacheHitsToday: number;
   l1Hits: number;
   l2Hits: number;
@@ -139,6 +145,13 @@ interface ServersReportResponse {
     cloudflareWorkerTemplate: string;
     dayKey?: string;
     quotaResetInSeconds?: number;
+    clusterSummary?: {
+      architecture: string;
+      primaryServers: number;
+      backupServers: number;
+      freeAndUnlimited: boolean;
+      autoServerFailover: boolean;
+    };
   };
   serverQuotaSummary: ServerQuotaSummary;
   quoteApiQuota: QuoteApiQuota;
@@ -155,14 +168,14 @@ interface ProbeOutcome {
 }
 
 const DEFAULT_DAILY_QUOTAS: ServerDailyQuotas = {
-  serverDailyQuota: 100000,
-  quoteDailyQuota: 50000,
-  verifyStockDailyQuota: 50000,
-  uploadDailyQuota: 10000,
-  bootstrapDailyQuota: 100000,
-  firestoreReadsDailyQuota: 50000,
-  upstashDailyQuota: 10000,
-  authDailyQuota: 50000
+  serverDailyQuota: 10000000,
+  quoteDailyQuota: 5000000,
+  verifyStockDailyQuota: 5000000,
+  uploadDailyQuota: 1000000,
+  bootstrapDailyQuota: 10000000,
+  firestoreReadsDailyQuota: 5000000,
+  upstashDailyQuota: 1000000,
+  authDailyQuota: 5000000
 };
 
 export const ServerApiControlCenter: React.FC = () => {
@@ -176,16 +189,20 @@ export const ServerApiControlCenter: React.FC = () => {
   const [resettingUsage, setResettingUsage] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [probingTarget, setProbingTarget] = useState<string | null>(null);
+  const [probingAll, setProbingAll] = useState(false);
   const [probeResults, setProbeResults] = useState<Record<string, ProbeOutcome>>({});
   const [selectedGroup, setSelectedGroup] = useState<string>('ALL');
+  const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
+  const [editingNodeUrl, setEditingNodeUrl] = useState('');
 
   const [newNodeLabel, setNewNodeLabel] = useState('');
   const [newNodeUrl, setNewNodeUrl] = useState('');
   const [newNodeRegion, setNewNodeRegion] = useState('global-edge');
-  const [newNodeRole, setNewNodeRole] = useState<'secondary' | 'edge-worker'>('edge-worker');
+  const [newNodeRole, setNewNodeRole] = useState<'primary' | 'secondary' | 'edge-worker'>('edge-worker');
 
   const normalizeConfig = (cfg: ServerControlConfig): ServerControlConfig => ({
     ...cfg,
+    unlimitedFreeMode: cfg.unlimitedFreeMode !== false,
     dailyQuotas: {
       ...DEFAULT_DAILY_QUOTAS,
       ...(cfg.dailyQuotas || {})
@@ -285,6 +302,40 @@ export const ServerApiControlCenter: React.FC = () => {
       showToast(err instanceof Error ? err.message : 'Probe error', 'error');
     } finally {
       setProbingTarget(null);
+    }
+  };
+
+  const probeAllClusterNodes = async () => {
+    if (!firebaseUser || !configForm) return;
+    setProbingAll(true);
+    try {
+      const token = await firebaseUser.getIdToken();
+      const outcomes = await Promise.all(
+        configForm.serverNodes.map(async (node) => {
+          const res = await adminApiFetch('/api/admin/servers/probe', token, {
+            method: 'POST',
+            body: JSON.stringify({ target: node.id })
+          });
+          const data = (await res.json()) as ProbeOutcome;
+          return [node.id, data] as const;
+        })
+      );
+      setProbeResults((prev) => {
+        const next = { ...prev };
+        for (const [id, data] of outcomes) {
+          next[id] = data;
+        }
+        return next;
+      });
+      const healthyCount = outcomes.filter(([, d]) => d.ok).length;
+      showToast(
+        `Cluster Health Check: ${healthyCount}/${outcomes.length} servers responding online!`,
+        healthyCount === outcomes.length ? 'success' : 'error'
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Cluster probe failed', 'error');
+    } finally {
+      setProbingAll(false);
     }
   };
 
@@ -643,89 +694,178 @@ export const ServerApiControlCenter: React.FC = () => {
         </div>
       )}
 
-      {/* Connected Servers & Edge Failover Cluster */}
+      {/* Connected 2-Primary + 2-Backup Free & Unlimited Failover Cluster */}
       {configForm && (
         <div className="bg-white rounded-2xl border border-gray-100 shadow-xs p-5 space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-3">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-gray-100 pb-3">
             <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center">
+              <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
                 <Server size={18} />
               </div>
               <div>
-                <h3 className="font-bold text-gray-800 text-base">
-                  Connected Origin Servers &amp; Cloudflare Edge Cluster
-                </h3>
-                <p className="text-xs text-gray-500">
-                  Client requests automatically route through enabled origins in priority order with per-node daily quota tracking.
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h3 className="font-bold text-gray-800 text-base">
+                    2 Primary + 2 Backup Server Cluster
+                  </h3>
+                  <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                    Free &amp; Unlimited
+                  </span>
+                  {report?.runtime.clusterSummary && (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">
+                      {report.runtime.clusterSummary.architecture}
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Traffic load-balances across Primary Server 1 &amp; Primary Server 2 and fails over automatically to Backup Server 3 &amp; Backup Server 4 with zero quota lockouts.
                 </p>
               </div>
             </div>
-            <label className="flex items-center gap-2 text-xs font-bold text-gray-700 bg-gray-50 px-3 py-2 rounded-xl border border-gray-200 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={configForm.autoServerFailover}
-                onChange={(e) => {
-                  const next = { ...configForm, autoServerFailover: e.target.checked };
-                  setConfigForm(next);
-                  void saveConfig(next);
-                }}
-                className="w-4 h-4 accent-blue-600 rounded"
-              />
-              Auto Server Failover
-            </label>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={probingAll}
+                onClick={() => void probeAllClusterNodes()}
+                className="px-3 py-2 rounded-xl text-xs font-bold bg-gray-900 hover:bg-gray-800 disabled:opacity-50 text-white flex items-center gap-1.5"
+              >
+                <Activity size={13} className={probingAll ? 'animate-pulse' : ''} />
+                {probingAll ? 'Checking 4 Servers...' : 'Ping All 4 Servers'}
+              </button>
+
+              <label className="flex items-center gap-2 text-xs font-bold text-emerald-800 bg-emerald-50 px-3 py-2 rounded-xl border border-emerald-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={configForm.unlimitedFreeMode !== false}
+                  onChange={(e) => {
+                    const next = { ...configForm, unlimitedFreeMode: e.target.checked };
+                    setConfigForm(next);
+                    void saveConfig(next);
+                  }}
+                  className="w-4 h-4 accent-emerald-600 rounded"
+                />
+                Free &amp; Unlimited Mode
+              </label>
+
+              <label className="flex items-center gap-2 text-xs font-bold text-gray-700 bg-gray-50 px-3 py-2 rounded-xl border border-gray-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={configForm.autoServerFailover}
+                  onChange={(e) => {
+                    const next = { ...configForm, autoServerFailover: e.target.checked };
+                    setConfigForm(next);
+                    void saveConfig(next);
+                  }}
+                  className="w-4 h-4 accent-blue-600 rounded"
+                />
+                Auto Failover
+              </label>
+            </div>
           </div>
 
-          <div className="space-y-2.5">
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
             {configForm.serverNodes.map((node) => {
               const probe = probeResults[node.id];
               const nodeQuota = summary?.nodeQuotas.find((nq) => nq.nodeId === node.id);
-              const nodePct = nodeQuota
-                ? getPercentUsed(nodeQuota.usedToday, nodeQuota.dailyQuota)
-                : 0;
+              const isPrimaryTier = node.tier === 'primary' || node.role === 'primary';
+              const isProtectedClusterNode = [
+                'primary-server-1',
+                'primary-server-2',
+                'backup-server-3',
+                'backup-server-4',
+                'origin-primary'
+              ].includes(node.id);
+              const isEditingThis = editingNodeId === node.id;
+
               return (
                 <div
                   key={node.id}
-                  className="p-3.5 rounded-xl border border-gray-100 bg-gray-50 flex flex-col lg:flex-row lg:items-center justify-between gap-3"
+                  className={`p-4 rounded-xl border flex flex-col justify-between gap-3 ${
+                    isPrimaryTier
+                      ? 'border-blue-100 bg-blue-50/30'
+                      : 'border-amber-100 bg-amber-50/30'
+                  }`}
                 >
-                  <div className="min-w-0 space-y-1 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-gray-900 text-white">
-                        P{node.priority}
+                  <div className="min-w-0 space-y-1.5">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span
+                          className={`text-[10px] font-extrabold px-2 py-0.5 rounded text-white ${
+                            isPrimaryTier ? 'bg-blue-700' : 'bg-amber-600'
+                          }`}
+                        >
+                          {isPrimaryTier ? `PRIMARY #${node.priority}` : `BACKUP #${node.priority}`}
+                        </span>
+                        <span className="font-bold text-sm text-gray-900">{node.label}</span>
+                      </div>
+                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-emerald-100 text-emerald-700">
+                        Free • Unlimited
                       </span>
-                      <span className="font-bold text-sm text-gray-900">{node.label}</span>
-                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-blue-100 text-blue-700">
-                        {node.role}
-                      </span>
-                      <span className="text-[11px] text-gray-400">({node.region})</span>
                     </div>
-                    <p className="text-xs font-mono text-gray-600 truncate">
-                      {node.url || 'Same-Origin Express Server (Port 3000)'}
-                    </p>
+
+                    {isEditingThis ? (
+                      <div className="flex items-center gap-1.5 pt-1">
+                        <input
+                          type="text"
+                          value={editingNodeUrl}
+                          onChange={(e) => setEditingNodeUrl(e.target.value)}
+                          placeholder="Leave blank for Same-Origin HA, or https://..."
+                          className="flex-1 p-2 bg-white border border-gray-300 rounded-lg text-xs font-mono outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const clean = editingNodeUrl.trim().replace(/\/+$/, '');
+                            if (clean && !/^https?:\/\//i.test(clean)) {
+                              showToast('URL must start with https:// or http:// (or leave blank for same-origin)', 'error');
+                              return;
+                            }
+                            const nextNodes = configForm.serverNodes.map((n) =>
+                              n.id === node.id ? { ...n, url: clean } : n
+                            );
+                            const next = { ...configForm, serverNodes: nextNodes };
+                            setConfigForm(next);
+                            setEditingNodeId(null);
+                            void saveConfig(next);
+                          }}
+                          className="px-2.5 py-2 rounded-lg bg-blue-600 text-white text-xs font-bold"
+                        >
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditingNodeId(null)}
+                          className="px-2 py-2 rounded-lg bg-gray-200 text-gray-700 text-xs font-bold"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <p className="text-xs font-mono text-gray-600 truncate">
+                        {node.url ||
+                          (isPrimaryTier
+                            ? 'Same-Origin Express HA Pool (Port 3000 • Zero Cost)'
+                            : 'Cloud Failover & Local Resilient Standby (Zero Cost)')}
+                      </p>
+                    )}
+
                     {nodeQuota && (
-                      <div className="pt-1 max-w-md space-y-1">
+                      <div className="pt-1 space-y-1">
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px]">
-                          <span className="text-gray-500 font-semibold">{nodeQuota.quotaTier}:</span>
-                          <span className="text-gray-800 font-bold">
-                            Quota {nodeQuota.dailyQuota.toLocaleString()}/day
-                          </span>
+                          <span className="text-gray-500 font-semibold">{nodeQuota.quotaTier}</span>
                           <span className="text-blue-700 font-bold">
-                            Used {nodeQuota.usedToday.toLocaleString()}
+                            Served: {nodeQuota.usedToday.toLocaleString()}
                           </span>
                           <span className="text-emerald-700 font-bold">
-                            Balance {nodeQuota.remainingToday.toLocaleString()}
+                            Quota: {nodeQuota.isUnlimited ? '∞ Unlimited' : `${nodeQuota.dailyQuota.toLocaleString()}/day`}
                           </span>
                         </div>
-                        <div className="w-full h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                          <div
-                            className={`h-full rounded-full ${getUsageBarColor(
-                              nodeQuota.usedToday,
-                              nodeQuota.dailyQuota
-                            )}`}
-                            style={{ width: `${Math.max(2, nodePct)}%` }}
-                          />
+                        <div className="w-full h-1.5 bg-white/80 rounded-full overflow-hidden border border-gray-200">
+                          <div className="h-full rounded-full bg-emerald-500 w-full" />
                         </div>
                       </div>
                     )}
+
                     {probe && (
                       <p
                         className={`text-[11px] font-semibold flex items-center gap-1 ${
@@ -739,7 +879,18 @@ export const ServerApiControlCenter: React.FC = () => {
                     )}
                   </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
+                  <div className="flex items-center justify-end gap-2 pt-2 border-t border-gray-200/70">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingNodeId(node.id);
+                        setEditingNodeUrl(node.url || '');
+                      }}
+                      className="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-white border border-gray-200 hover:bg-gray-100 text-gray-700"
+                    >
+                      Set URL
+                    </button>
+
                     <button
                       type="button"
                       disabled={probingTarget === node.id}
@@ -751,7 +902,7 @@ export const ServerApiControlCenter: React.FC = () => {
 
                     <button
                       type="button"
-                      disabled={node.id === 'origin-primary'}
+                      disabled={node.id === 'primary-server-1' || node.id === 'origin-primary'}
                       onClick={() => {
                         const nextNodes = configForm.serverNodes.map((n) =>
                           n.id === node.id ? { ...n, enabled: !n.enabled } : n
@@ -766,10 +917,10 @@ export const ServerApiControlCenter: React.FC = () => {
                           : 'bg-gray-200 text-gray-600'
                       } disabled:opacity-60`}
                     >
-                      {node.enabled ? 'Enabled' : 'Disabled'}
+                      {node.enabled ? 'Active' : 'Paused'}
                     </button>
 
-                    {node.id !== 'origin-primary' && (
+                    {!isProtectedClusterNode && (
                       <button
                         type="button"
                         onClick={() => {
@@ -790,7 +941,7 @@ export const ServerApiControlCenter: React.FC = () => {
             })}
           </div>
 
-          {/* Add Backup Origin / Cloudflare Worker */}
+          {/* Add Extra Primary or Backup Origin / Cloudflare Worker */}
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -801,10 +952,12 @@ export const ServerApiControlCenter: React.FC = () => {
               }
               const nextNode: ServerNodeConfig = {
                 id: `node_${Date.now().toString(36)}`,
-                label: newNodeLabel.trim() || 'Edge Backup Server',
+                label: newNodeLabel.trim() || 'Extra Backup Server',
                 url: cleanUrl,
                 region: newNodeRegion.trim() || 'global-edge',
                 role: newNodeRole,
+                tier: newNodeRole === 'primary' ? 'primary' : 'backup',
+                freeUnlimited: true,
                 enabled: true,
                 priority: configForm.serverNodes.length + 1
               };
@@ -821,7 +974,7 @@ export const ServerApiControlCenter: React.FC = () => {
           >
             <input
               type="text"
-              placeholder="Node Label (e.g. Cloudflare Edge)"
+              placeholder="Extra Server Label (Optional)"
               value={newNodeLabel}
               onChange={(e) => setNewNodeLabel(e.target.value)}
               className="p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs outline-none"
@@ -829,18 +982,19 @@ export const ServerApiControlCenter: React.FC = () => {
             <input
               type="url"
               required
-              placeholder="https://worker-or-backup.example.com"
+              placeholder="https://extra-server.example.com"
               value={newNodeUrl}
               onChange={(e) => setNewNodeUrl(e.target.value)}
               className="sm:col-span-2 p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-mono outline-none"
             />
             <select
               value={newNodeRole}
-              onChange={(e) => setNewNodeRole(e.target.value as 'secondary' | 'edge-worker')}
+              onChange={(e) => setNewNodeRole(e.target.value as 'primary' | 'secondary' | 'edge-worker')}
               className="p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs outline-none"
             >
-              <option value="edge-worker">Cloudflare Edge Worker</option>
-              <option value="secondary">Replica Origin Server</option>
+              <option value="primary">Primary Origin Server</option>
+              <option value="edge-worker">Cloudflare Edge Backup</option>
+              <option value="secondary">Backup Origin Server</option>
             </select>
             <button
               type="submit"

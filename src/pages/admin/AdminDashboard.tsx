@@ -6,7 +6,7 @@ import {
   Menu, X, Shield, Plus, Search, Edit2, Trash2, Check, CheckCircle2,
   AlertTriangle, Filter, Eye, Phone, MapPin, IndianRupee, ArrowUpRight, Sprout,
   Download, Upload, Monitor, Camera, Database, Server, Calendar, Clock, Landmark, Smartphone,
-  ChevronLeft, ChevronRight
+  ChevronLeft, ChevronRight, Wrench
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { useAuth } from '../../context/AuthContext';
@@ -29,6 +29,7 @@ import { useToast } from '../../context/ToastContext';
 import { AreaPincodeControlCenter } from '../../components/admin/AreaPincodeControlCenter';
 import { DatabaseControlCenter } from '../../components/admin/DatabaseControlCenter';
 import { ServerApiControlCenter } from '../../components/admin/ServerApiControlCenter';
+import { CleanupDiagnosticsControlCenter } from '../../components/admin/CleanupDiagnosticsControlCenter';
 import { AppLogo } from '../../components/AppLogo';
 
 const SLOT_TIME_WINDOWS = [
@@ -50,6 +51,7 @@ const TABS = [
   { id: 'areas', label: 'Area & Pincode Control', icon: MapPin },
   { id: 'databases', label: 'Database Control', icon: Database },
   { id: 'servers', label: 'Server & API Control', icon: Server },
+  { id: 'cleanup_diagnostics', label: 'CleanUp & App Diagnosis', icon: Wrench },
   { id: 'customers', label: 'Customer Management', icon: Users },
   { id: 'delivery', label: 'Delivery Men Management', icon: Truck },
   { id: 'orders', label: 'Order Management', icon: ShoppingCart },
@@ -2479,6 +2481,9 @@ export const AdminDashboard = () => {
 
       case 'servers':
         return <ServerApiControlCenter />;
+
+      case 'cleanup_diagnostics':
+        return <CleanupDiagnosticsControlCenter />;
 
       default:
         return null;

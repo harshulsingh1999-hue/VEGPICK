@@ -6,6 +6,7 @@ import Database from 'better-sqlite3';
 import { Redis } from '@upstash/redis';
 import { Ratelimit } from '@upstash/ratelimit';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { createMaintenanceDiagnostics } from './maintenanceDiagnostics.ts';
 
 export interface FirebaseAppletMeta {
   projectId?: string;
@@ -82,6 +83,8 @@ export interface ServerNodeConfig {
   url: string;
   region: string;
   role: 'primary' | 'secondary' | 'edge-worker';
+  tier?: 'primary' | 'backup';
+  freeUnlimited?: boolean;
   enabled: boolean;
   priority: number;
 }
@@ -111,6 +114,7 @@ export interface ServerControlConfig {
   };
   dailyQuotas: ServerDailyQuotas;
   autoServerFailover: boolean;
+  unlimitedFreeMode: boolean;
   updatedAt: string;
 }
 
@@ -376,41 +380,84 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     updatedAt: new Date().toISOString()
   };
 
+  const cleanUrl = (raw?: string) => (raw || '').trim().replace(/\/+$/, '');
   const envExtraServers = (process.env.VITE_API_SERVERS || '')
     .split(',')
     .map((s) => s.trim().replace(/\/+$/, ''))
     .filter(Boolean);
 
+  const primary1EnvUrl = cleanUrl(process.env.PRIMARY_SERVER_1_URL);
+  const primary2EnvUrl = cleanUrl(process.env.PRIMARY_SERVER_2_URL) || envExtraServers[0] || '';
+  const backup3EnvUrl = cleanUrl(process.env.BACKUP_SERVER_3_URL) || envExtraServers[1] || '';
+  const backup4EnvUrl = cleanUrl(process.env.BACKUP_SERVER_4_URL) || envExtraServers[2] || '';
+
   const initialNodes: ServerNodeConfig[] = [
     {
-      id: 'origin-primary',
-      label: 'Primary Express Origin (Node.js)',
-      url: '',
+      id: 'primary-server-1',
+      label: 'Primary Server 1 (Active Origin)',
+      url: primary1EnvUrl,
       region: process.env.SERVER_REGION || 'asia-southeast1',
       role: 'primary',
+      tier: 'primary',
+      freeUnlimited: true,
       enabled: true,
       priority: 1
     },
-    ...envExtraServers.map((url, idx) => ({
-      id: `replica-${idx + 1}`,
-      label: url.includes('workers.dev') ? `Cloudflare Edge Proxy #${idx + 1}` : `Replica Server #${idx + 1}`,
+    {
+      id: 'primary-server-2',
+      label: 'Primary Server 2 (Active Load-Balanced)',
+      url: primary2EnvUrl,
+      region: 'asia-southeast1',
+      role: 'primary',
+      tier: 'primary',
+      freeUnlimited: true,
+      enabled: true,
+      priority: 2
+    },
+    {
+      id: 'backup-server-3',
+      label: 'Backup Server 3 (Edge / Hot Failover)',
+      url: backup3EnvUrl,
+      region: 'global-edge',
+      role: backup3EnvUrl.includes('workers.dev') ? 'edge-worker' : 'secondary',
+      tier: 'backup',
+      freeUnlimited: true,
+      enabled: true,
+      priority: 3
+    },
+    {
+      id: 'backup-server-4',
+      label: 'Backup Server 4 (Cold Standby / Offline Shield)',
+      url: backup4EnvUrl,
+      region: 'multi-region',
+      role: backup4EnvUrl.includes('workers.dev') ? 'edge-worker' : 'secondary',
+      tier: 'backup',
+      freeUnlimited: true,
+      enabled: true,
+      priority: 4
+    },
+    ...envExtraServers.slice(3).map((url, idx) => ({
+      id: `replica-${idx + 5}`,
+      label: url.includes('workers.dev') ? `Cloudflare Edge Proxy #${idx + 5}` : `Replica Server #${idx + 5}`,
       url,
       region: 'global-edge',
       role: (url.includes('workers.dev') ? 'edge-worker' : 'secondary') as 'edge-worker' | 'secondary',
+      tier: 'backup' as const,
+      freeUnlimited: true,
       enabled: true,
-      priority: idx + 2
+      priority: idx + 5
     }))
   ];
 
   const DEFAULT_DAILY_QUOTAS: ServerDailyQuotas = {
-    serverDailyQuota: 100000,
-    quoteDailyQuota: 50000,
-    verifyStockDailyQuota: 50000,
-    uploadDailyQuota: 10000,
-    bootstrapDailyQuota: 100000,
-    firestoreReadsDailyQuota: 50000,
-    upstashDailyQuota: 10000,
-    authDailyQuota: 50000
+    serverDailyQuota: 10000000,
+    quoteDailyQuota: 5000000,
+    verifyStockDailyQuota: 5000000,
+    uploadDailyQuota: 1000000,
+    bootstrapDailyQuota: 10000000,
+    firestoreReadsDailyQuota: 5000000,
+    upstashDailyQuota: 1000000,
+    authDailyQuota: 5000000
   };
 
   const DEFAULT_SERVER_CONTROL: ServerControlConfig = {
@@ -419,14 +466,15 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     slotsTtlSeconds: 60,
     quoteTtlSeconds: 30,
     rateLimits: {
-      uploadPerMin: 25,
-      verifyStockPerMin: 60,
-      quotePerMin: 90,
-      archivePerMin: 120,
-      invalidatePerMin: 30
+      uploadPerMin: 500,
+      verifyStockPerMin: 2000,
+      quotePerMin: 2000,
+      archivePerMin: 2000,
+      invalidatePerMin: 500
     },
     dailyQuotas: DEFAULT_DAILY_QUOTAS,
     autoServerFailover: true,
+    unlimitedFreeMode: true,
     updatedAt: new Date().toISOString()
   };
 
@@ -457,9 +505,47 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
 
   let dbControlConfig: DbControlConfig = readControlJson('db_control', DEFAULT_DB_CONTROL);
   const rawServerCfg = readControlJson('server_control', DEFAULT_SERVER_CONTROL);
+
+  // Ensure the 4-server cluster (Primary 1, Primary 2, Backup 3, Backup 4) is always present
+  const existingNodes = Array.isArray(rawServerCfg.serverNodes) ? rawServerCfg.serverNodes : [];
+  const hasFourClusterIds = ['primary-server-1', 'primary-server-2', 'backup-server-3', 'backup-server-4'].every(
+    (reqId) => existingNodes.some((n) => n.id === reqId)
+  );
+  let migratedNodes: ServerNodeConfig[];
+  if (hasFourClusterIds) {
+    migratedNodes = existingNodes.map((n, idx) => ({
+      ...n,
+      tier: n.tier || (n.role === 'primary' ? 'primary' : 'backup'),
+      freeUnlimited: n.freeUnlimited ?? true,
+      priority: n.priority || idx + 1
+    }));
+  } else {
+    const customExtras = existingNodes.filter(
+      (n) =>
+        n.id !== 'origin-primary' &&
+        n.id !== 'primary-server-1' &&
+        n.id !== 'primary-server-2' &&
+        n.id !== 'backup-server-3' &&
+        n.id !== 'backup-server-4' &&
+        Boolean(n.url)
+    );
+    migratedNodes = [
+      ...initialNodes,
+      ...customExtras.map((n, idx) => ({
+        ...n,
+        tier: (n.role === 'primary' ? 'primary' : 'backup') as 'primary' | 'backup',
+        freeUnlimited: true,
+        priority: 5 + idx
+      }))
+    ];
+  }
+
   let serverControlConfig: ServerControlConfig = {
     ...DEFAULT_SERVER_CONTROL,
     ...rawServerCfg,
+    serverNodes: migratedNodes,
+    unlimitedFreeMode:
+      typeof rawServerCfg.unlimitedFreeMode === 'boolean' ? rawServerCfg.unlimitedFreeMode : true,
     rateLimits: {
       ...DEFAULT_SERVER_CONTROL.rateLimits,
       ...(rawServerCfg.rateLimits || {})
@@ -469,6 +555,9 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
       ...(rawServerCfg.dailyQuotas || {})
     }
   };
+  if (!hasFourClusterIds) {
+    writeControlJson('server_control', serverControlConfig);
+  }
 
   const getDbControlConfig = (): DbControlConfig => dbControlConfig;
   const updateDbControlConfig = (patch: Partial<DbControlConfig>): DbControlConfig => {
@@ -545,6 +634,8 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
             url: rawUrl,
             region: String(node.region || 'auto').trim().slice(0, 40),
             role,
+            tier: node.tier || (role === 'primary' ? 'primary' : 'backup'),
+            freeUnlimited: typeof node.freeUnlimited === 'boolean' ? node.freeUnlimited : true,
             enabled: Boolean(node.enabled),
             priority: Math.max(1, Math.min(99, Number(node.priority) || index + 1))
           };
@@ -557,22 +648,22 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     }
 
     const nextLimits = {
-      uploadPerMin: Math.max(5, Math.min(1000, Number(patch.rateLimits?.uploadPerMin ?? serverControlConfig.rateLimits.uploadPerMin))),
-      verifyStockPerMin: Math.max(10, Math.min(5000, Number(patch.rateLimits?.verifyStockPerMin ?? serverControlConfig.rateLimits.verifyStockPerMin))),
-      quotePerMin: Math.max(10, Math.min(5000, Number(patch.rateLimits?.quotePerMin ?? serverControlConfig.rateLimits.quotePerMin))),
-      archivePerMin: Math.max(10, Math.min(5000, Number(patch.rateLimits?.archivePerMin ?? serverControlConfig.rateLimits.archivePerMin))),
-      invalidatePerMin: Math.max(5, Math.min(1000, Number(patch.rateLimits?.invalidatePerMin ?? serverControlConfig.rateLimits.invalidatePerMin)))
+      uploadPerMin: Math.max(5, Math.min(50000, Number(patch.rateLimits?.uploadPerMin ?? serverControlConfig.rateLimits.uploadPerMin))),
+      verifyStockPerMin: Math.max(10, Math.min(50000, Number(patch.rateLimits?.verifyStockPerMin ?? serverControlConfig.rateLimits.verifyStockPerMin))),
+      quotePerMin: Math.max(10, Math.min(50000, Number(patch.rateLimits?.quotePerMin ?? serverControlConfig.rateLimits.quotePerMin))),
+      archivePerMin: Math.max(10, Math.min(50000, Number(patch.rateLimits?.archivePerMin ?? serverControlConfig.rateLimits.archivePerMin))),
+      invalidatePerMin: Math.max(5, Math.min(50000, Number(patch.rateLimits?.invalidatePerMin ?? serverControlConfig.rateLimits.invalidatePerMin)))
     };
 
     const nextDailyQuotas: ServerDailyQuotas = {
-      serverDailyQuota: Math.max(1000, Math.min(50000000, Number(patch.dailyQuotas?.serverDailyQuota ?? serverControlConfig.dailyQuotas.serverDailyQuota))),
-      quoteDailyQuota: Math.max(500, Math.min(10000000, Number(patch.dailyQuotas?.quoteDailyQuota ?? serverControlConfig.dailyQuotas.quoteDailyQuota))),
-      verifyStockDailyQuota: Math.max(500, Math.min(10000000, Number(patch.dailyQuotas?.verifyStockDailyQuota ?? serverControlConfig.dailyQuotas.verifyStockDailyQuota))),
-      uploadDailyQuota: Math.max(100, Math.min(5000000, Number(patch.dailyQuotas?.uploadDailyQuota ?? serverControlConfig.dailyQuotas.uploadDailyQuota))),
-      bootstrapDailyQuota: Math.max(1000, Math.min(50000000, Number(patch.dailyQuotas?.bootstrapDailyQuota ?? serverControlConfig.dailyQuotas.bootstrapDailyQuota))),
-      firestoreReadsDailyQuota: Math.max(1000, Math.min(10000000, Number(patch.dailyQuotas?.firestoreReadsDailyQuota ?? serverControlConfig.dailyQuotas.firestoreReadsDailyQuota))),
-      upstashDailyQuota: Math.max(1000, Math.min(10000000, Number(patch.dailyQuotas?.upstashDailyQuota ?? serverControlConfig.dailyQuotas.upstashDailyQuota))),
-      authDailyQuota: Math.max(1000, Math.min(10000000, Number(patch.dailyQuotas?.authDailyQuota ?? serverControlConfig.dailyQuotas.authDailyQuota)))
+      serverDailyQuota: Math.max(1000, Math.min(100000000, Number(patch.dailyQuotas?.serverDailyQuota ?? serverControlConfig.dailyQuotas.serverDailyQuota))),
+      quoteDailyQuota: Math.max(500, Math.min(100000000, Number(patch.dailyQuotas?.quoteDailyQuota ?? serverControlConfig.dailyQuotas.quoteDailyQuota))),
+      verifyStockDailyQuota: Math.max(500, Math.min(100000000, Number(patch.dailyQuotas?.verifyStockDailyQuota ?? serverControlConfig.dailyQuotas.verifyStockDailyQuota))),
+      uploadDailyQuota: Math.max(100, Math.min(100000000, Number(patch.dailyQuotas?.uploadDailyQuota ?? serverControlConfig.dailyQuotas.uploadDailyQuota))),
+      bootstrapDailyQuota: Math.max(1000, Math.min(100000000, Number(patch.dailyQuotas?.bootstrapDailyQuota ?? serverControlConfig.dailyQuotas.bootstrapDailyQuota))),
+      firestoreReadsDailyQuota: Math.max(1000, Math.min(100000000, Number(patch.dailyQuotas?.firestoreReadsDailyQuota ?? serverControlConfig.dailyQuotas.firestoreReadsDailyQuota))),
+      upstashDailyQuota: Math.max(1000, Math.min(100000000, Number(patch.dailyQuotas?.upstashDailyQuota ?? serverControlConfig.dailyQuotas.upstashDailyQuota))),
+      authDailyQuota: Math.max(1000, Math.min(100000000, Number(patch.dailyQuotas?.authDailyQuota ?? serverControlConfig.dailyQuotas.authDailyQuota)))
     };
 
     serverControlConfig = writeControlJson('server_control', {
@@ -586,6 +677,10 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
         typeof patch.autoServerFailover === 'boolean'
           ? patch.autoServerFailover
           : serverControlConfig.autoServerFailover,
+      unlimitedFreeMode:
+        typeof patch.unlimitedFreeMode === 'boolean'
+          ? patch.unlimitedFreeMode
+          : serverControlConfig.unlimitedFreeMode,
       updatedAt: new Date().toISOString()
     });
     return serverControlConfig;
@@ -2591,33 +2686,64 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
 
     const quoteApi = apiRegistry.find((a) => a.id === 'api-quote');
 
+    const isUnlimited = serverControlConfig.unlimitedFreeMode !== false;
+
     const nodeQuotas = serverControlConfig.serverNodes.map((node) => {
+      const tierLabel = node.tier === 'primary' || node.role === 'primary' ? 'Primary' : 'Backup';
+      const isPrimarySlot1 = node.id === 'primary-server-1' || node.id === 'origin-primary';
+      const usedToday = isPrimarySlot1 ? serverRequestsUsedToday : 0;
+
+      if (isUnlimited || node.freeUnlimited) {
+        return {
+          nodeId: node.id,
+          label: node.label,
+          role: node.role,
+          tier: tierLabel.toLowerCase(),
+          enabled: node.enabled,
+          isUnlimited: true,
+          quotaTier: `${tierLabel} Server • Free & Unlimited`,
+          dailyQuota: quotas.serverDailyQuota,
+          usedToday,
+          remainingToday: Math.max(0, quotas.serverDailyQuota - usedToday)
+        };
+      }
+
       if (node.role === 'edge-worker') {
         const edgeDailyQuota = 100000;
         return {
           nodeId: node.id,
           label: node.label,
           role: node.role,
+          tier: 'backup',
           enabled: node.enabled,
+          isUnlimited: false,
           quotaTier: 'Cloudflare Workers Free Tier',
           dailyQuota: edgeDailyQuota,
           usedToday: 0,
           remainingToday: edgeDailyQuota
         };
       }
-      const usedToday = node.id === 'origin-primary' ? serverRequestsUsedToday : 0;
       return {
         nodeId: node.id,
         label: node.label,
         role: node.role,
+        tier: tierLabel.toLowerCase(),
         enabled: node.enabled,
+        isUnlimited: false,
         quotaTier:
-          node.id === 'origin-primary' ? 'Primary Express Daily Budget' : 'Replica Origin Budget',
+          isPrimarySlot1 ? 'Primary Express Daily Budget' : 'Replica Origin Budget',
         dailyQuota: quotas.serverDailyQuota,
         usedToday,
         remainingToday: Math.max(0, quotas.serverDailyQuota - usedToday)
       };
     });
+
+    const primaryCount = serverControlConfig.serverNodes.filter(
+      (n) => n.enabled && (n.role === 'primary' || n.tier === 'primary')
+    ).length;
+    const backupCount = serverControlConfig.serverNodes.filter(
+      (n) => n.enabled && n.role !== 'primary' && n.tier !== 'primary'
+    ).length;
 
     return {
       controlConfig: {
@@ -2632,11 +2758,18 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
         heapUsedBytes: mem.heapUsed,
         heapLimitBytes,
         heapRemainingBytes,
-        replicaId: process.env.REPLICA_ID || 'node-primary',
+        replicaId: process.env.REPLICA_ID || 'node-1',
         region: process.env.SERVER_REGION || 'asia-southeast1',
         cloudflareWorkerTemplate: 'cloudflare/worker.js',
         dayKey,
-        quotaResetInSeconds
+        quotaResetInSeconds,
+        clusterSummary: {
+          architecture: `${primaryCount} Primary + ${backupCount} Backup HA Cluster`,
+          primaryServers: primaryCount,
+          backupServers: backupCount,
+          freeAndUnlimited: isUnlimited,
+          autoServerFailover: serverControlConfig.autoServerFailover
+        }
       },
       serverQuotaSummary: {
         serverRequestsDailyQuota: quotas.serverDailyQuota,
@@ -2648,6 +2781,7 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
         protectedRemainingThisMin,
         serverThrottledToday,
         serverErrorsToday,
+        unlimitedFreeMode: isUnlimited,
         cacheHitsToday: Math.max(
           totalCacheHits,
           expressApis.reduce((sum, a) => sum + a.cacheHitsToday, 0)
@@ -2828,8 +2962,31 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     }
   };
 
+  const maintenance = createMaintenanceDiagnostics({
+    rootDir,
+    uploadsDir,
+    sqlite,
+    sqlitePath,
+    l1Cache,
+    rateBuckets,
+    upstashRedis,
+    upstashConfigWarning,
+    supabase,
+    supabaseConfigWarning,
+    firebaseMeta,
+    getDbControlConfig,
+    getServerControlConfig,
+    updateServerControlConfig,
+    invalidateCatalogCache,
+    fetchPublicCatalogFromFirestore,
+    getDatabasesReport,
+    readControlJson,
+    writeControlJson
+  });
+
   return {
     uploadsDir,
+    maintenance,
     getCached,
     setCached,
     invalidateCatalogCache,
@@ -2850,31 +3007,49 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     probeServerOrApi,
     recordApiUsage,
     resetApiQuotaUsage,
-    getDiagnostics: () => ({
-      replicaId: process.env.REPLICA_ID || 'node-primary',
-      region: process.env.SERVER_REGION || 'asia-southeast1',
-      caches: {
-        l1Entries: l1Cache.size,
-        l2Provider: hasUpstash && dbControlConfig.l2CacheEnabled ? 'Upstash Redis REST' : 'Disabled (L1 Active)',
-        l1Hits: cacheStats.l1Hits,
-        l2Hits: cacheStats.l2Hits,
-        misses: cacheStats.misses
-      },
-      databases: {
-        realtimePrimary: 'Google Cloud Firestore (Enterprise Edition)',
-        edgeReplica: 'SQLite WAL (better-sqlite3)',
-        relationalArchive: hasSupabase && dbControlConfig.archivalSyncEnabled
-          ? 'Supabase PostgreSQL (PostgREST)'
-          : 'Local SQLite WAL Mirror',
-        activeReadPolicy: dbControlConfig.primaryReadDb,
-        autoFailoverEnabled: dbControlConfig.autoFailoverEnabled
-      },
-      objectStorage:
-        dbControlConfig.storageTarget === 'local'
-          ? 'Express Static Media Store (Forced)'
-          : hasR2
-          ? 'Cloudflare R2 + Local Static Fallback'
-          : 'Express Static Media Store'
-    })
+    getDiagnostics: () => {
+      const enabledNodes = serverControlConfig.serverNodes.filter((n) => n.enabled);
+      const primaryCount = enabledNodes.filter((n) => n.role === 'primary' || n.tier === 'primary').length;
+      const backupCount = enabledNodes.filter((n) => n.role !== 'primary' && n.tier !== 'primary').length;
+      return {
+        replicaId: process.env.REPLICA_ID || 'node-1',
+        region: process.env.SERVER_REGION || 'asia-southeast1',
+        cluster: {
+          architecture: `${primaryCount} Primary + ${backupCount} Backup HA Failover`,
+          primaryServers: primaryCount,
+          backupServers: backupCount,
+          freeAndUnlimited: serverControlConfig.unlimitedFreeMode !== false,
+          autoServerFailover: serverControlConfig.autoServerFailover,
+          nodes: enabledNodes.map((n) => ({
+            id: n.id,
+            label: n.label,
+            role: n.tier || (n.role === 'primary' ? 'primary' : 'backup'),
+            priority: n.priority
+          }))
+        },
+        caches: {
+          l1Entries: l1Cache.size,
+          l2Provider: hasUpstash && dbControlConfig.l2CacheEnabled ? 'Upstash Redis REST' : 'Disabled (L1 Active)',
+          l1Hits: cacheStats.l1Hits,
+          l2Hits: cacheStats.l2Hits,
+          misses: cacheStats.misses
+        },
+        databases: {
+          realtimePrimary: 'Google Cloud Firestore (Enterprise Edition)',
+          edgeReplica: 'SQLite WAL (better-sqlite3)',
+          relationalArchive: hasSupabase && dbControlConfig.archivalSyncEnabled
+            ? 'Supabase PostgreSQL (PostgREST)'
+            : 'Local SQLite WAL Mirror',
+          activeReadPolicy: dbControlConfig.primaryReadDb,
+          autoFailoverEnabled: dbControlConfig.autoFailoverEnabled
+        },
+        objectStorage:
+          dbControlConfig.storageTarget === 'local'
+            ? 'Express Static Media Store (Forced)'
+            : hasR2
+            ? 'Cloudflare R2 + Local Static Fallback'
+            : 'Express Static Media Store'
+      };
+    }
   };
 }

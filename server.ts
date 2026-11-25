@@ -96,6 +96,13 @@ async function startServer() {
       else if (p === '/analytics/summary') endpointId = 'api-analytics-summary';
       else if (p.startsWith('/admin/databases')) endpointId = 'api-admin-databases';
       else if (p.startsWith('/admin/servers')) endpointId = 'api-admin-servers';
+      else if (
+        p.startsWith('/admin/maintenance') ||
+        p.startsWith('/admin/cleanup') ||
+        p.startsWith('/admin/diagnostics')
+      ) {
+        endpointId = 'api-admin-servers';
+      }
       if (!endpointId) return;
 
       const xCache = String(res.getHeader('X-Cache') || '');
@@ -117,7 +124,19 @@ async function startServer() {
   const applyRateLimit =
     (bucket: 'upload' | 'verify-stock' | 'quote' | 'archive' | 'invalidate', windowSeconds: number): express.RequestHandler =>
     async (req, res, next) => {
-      const limits = cloud.getServerControlConfig().rateLimits;
+      const serverCfg = cloud.getServerControlConfig();
+      res.setHeader(
+        'X-Server-Cluster',
+        `2-Primary+2-Backup (${process.env.REPLICA_ID || 'node-1'})`
+      );
+      if (serverCfg.unlimitedFreeMode !== false) {
+        res.setHeader('X-Server-Plan', 'Free-Unlimited');
+        res.setHeader('X-RateLimit-Remaining', 'Unlimited');
+        next();
+        return;
+      }
+
+      const limits = serverCfg.rateLimits;
       const maxRequests =
         bucket === 'upload'
           ? limits.uploadPerMin
@@ -175,6 +194,7 @@ async function startServer() {
         replicaId: diag.replicaId,
         region: diag.region
       },
+      serverCluster: diag.cluster,
       cloudProjectId: firebaseMeta.projectId || null,
       firestoreDatabaseId: firebaseMeta.firestoreDatabaseId || null,
       platforms: ['Web', 'Android PWA/TWA', 'iOS Safari PWA'],
@@ -188,6 +208,7 @@ async function startServer() {
     res.setHeader('Cache-Control', 'public, max-age=30, stale-while-revalidate=60');
     res.json({
       autoServerFailover: cfg.autoServerFailover,
+      unlimitedFreeMode: cfg.unlimitedFreeMode !== false,
       serverNodes: cfg.serverNodes
         .filter((n) => n.enabled)
         .sort((a, b) => a.priority - b.priority)
@@ -583,6 +604,100 @@ async function startServer() {
 
   app.post('/api/admin/servers/reset-usage', requireAdmin, (_req, res) => {
     res.json(cloud.resetApiQuotaUsage());
+  });
+
+  // Public Client Error Telemetry Guard (Android PWA/TWA, iOS Safari/WebClip, Desktop Web)
+  app.post('/api/diagnostics/report', async (req, res) => {
+    const clientIp = (req.ip || req.socket.remoteAddress || 'unknown').slice(0, 64);
+    const rateCheck = await cloud.checkRateLimit('diagnostics-report', clientIp, 30, 60);
+    if (!rateCheck.allowed) {
+      res.status(429).json({ ok: false, error: 'Diagnostic rate limit exceeded.' });
+      return;
+    }
+
+    const body = (req.body || {}) as {
+      platform?: 'android' | 'ios' | 'web' | 'server';
+      severity?: 'info' | 'warning' | 'error';
+      category?: string;
+      message?: string;
+      route?: string;
+    };
+    const msg = typeof body.message === 'string' ? body.message.trim() : '';
+    if (!msg) {
+      res.status(400).json({ ok: false, error: 'Diagnostic message is required.' });
+      return;
+    }
+
+    const saved = cloud.maintenance.recordDiagnosticEvent({
+      platform: body.platform || 'web',
+      severity: body.severity || 'error',
+      category: body.category || 'runtime',
+      message: msg,
+      route: body.route || '',
+      userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : ''
+    });
+    res.status(202).json({ ok: true, id: saved.id });
+  });
+
+  // Super Admin CleanUp & Cross-Platform App Diagnosis (Android + iOS + Web)
+  app.get('/api/admin/maintenance', requireAdmin, async (_req, res) => {
+    try {
+      const overview = await cloud.maintenance.getMaintenanceOverview(PORT);
+      res.json(overview);
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Unable to load maintenance & diagnostics overview.'
+      });
+    }
+  });
+
+  app.post('/api/admin/cleanup/config', requireAdmin, (req, res) => {
+    const updated = cloud.maintenance.updateCleanupControlConfig(
+      (req.body || {}) as Record<string, unknown>
+    );
+    res.json({ ok: true, controlConfig: updated });
+  });
+
+  app.post('/api/admin/cleanup/run', requireAdmin, async (req, res) => {
+    const body = (req.body || {}) as {
+      mode?: 'auto' | 'manual';
+      purgeAllL1?: boolean;
+      purgeL2Catalog?: boolean;
+      pruneProofDaysOverride?: number;
+    };
+    const mode = body.mode === 'auto' ? 'auto' : 'manual';
+    const result = await cloud.maintenance.runSystemCleanup(mode, {
+      purgeAllL1: Boolean(body.purgeAllL1),
+      purgeL2Catalog: Boolean(body.purgeL2Catalog),
+      pruneProofDaysOverride:
+        typeof body.pruneProofDaysOverride === 'number' ? body.pruneProofDaysOverride : undefined
+    });
+    res.json(result);
+  });
+
+  app.post('/api/admin/diagnostics/config', requireAdmin, (req, res) => {
+    const updated = cloud.maintenance.updateDiagnosticsControlConfig(
+      (req.body || {}) as Record<string, unknown>
+    );
+    res.json({ ok: true, controlConfig: updated });
+  });
+
+  app.post('/api/admin/diagnostics/run', requireAdmin, async (req, res) => {
+    const body = (req.body || {}) as {
+      mode?: 'auto' | 'manual';
+      runSelfHeal?: boolean;
+    };
+    const mode = body.mode === 'auto' ? 'auto' : 'manual';
+    const report = await cloud.maintenance.runCrossPlatformDiagnostics(mode, PORT, {
+      runSelfHeal: typeof body.runSelfHeal === 'boolean' ? body.runSelfHeal : undefined
+    });
+    res.json(report);
+  });
+
+  app.post('/api/admin/diagnostics/resolve', requireAdmin, (req, res) => {
+    const target = typeof req.body?.target === 'string' ? req.body.target : 'all';
+    const result = cloud.maintenance.resolveDiagnosticEvents(target);
+    res.json(result);
   });
 
   // Explicit 404 for unknown API or missing uploaded media paths so SPA fallback never intercepts them

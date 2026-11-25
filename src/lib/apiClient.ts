@@ -1,7 +1,18 @@
 /**
- * Client-side Multi-Server Failover & Non-Blocking Cloud Sync Utilities
- * Supports both build-time VITE_API_SERVERS and live Admin Server Control Center failover nodes.
+ * Client-side 2-Primary + 2-Backup HA Cluster Failover & Circuit Breaker Utilities
+ * Routes requests across Primary Server 1 & Primary Server 2 (active-active) and
+ * automatically fails over to Backup Server 3 & Backup Server 4 on outage/5xx/429.
  */
+
+export interface RuntimeServerNode {
+  id: string;
+  label: string;
+  url: string;
+  role: 'primary' | 'secondary' | 'edge-worker';
+  tier?: 'primary' | 'backup';
+  enabled: boolean;
+  priority: number;
+}
 
 const configuredServers = (
   (import.meta.env.VITE_API_SERVERS as string | undefined) || ''
@@ -10,56 +21,190 @@ const configuredServers = (
   .map((s) => s.trim().replace(/\/+$/, ''))
   .filter(Boolean);
 
-const RUNTIME_ORIGINS_KEY = 'freshveggie_runtime_origins_v1';
+const DEFAULT_CLUSTER_NODES: RuntimeServerNode[] = [
+  {
+    id: 'primary-server-1',
+    label: 'Primary Server 1 (Active Origin)',
+    url: '',
+    role: 'primary',
+    tier: 'primary',
+    enabled: true,
+    priority: 1
+  },
+  {
+    id: 'primary-server-2',
+    label: 'Primary Server 2 (Active Load-Balanced)',
+    url: configuredServers[0] || '',
+    role: 'primary',
+    tier: 'primary',
+    enabled: true,
+    priority: 2
+  },
+  {
+    id: 'backup-server-3',
+    label: 'Backup Server 3 (Edge / Hot Failover)',
+    url: configuredServers[1] || '',
+    role: configuredServers[1]?.includes('workers.dev') ? 'edge-worker' : 'secondary',
+    tier: 'backup',
+    enabled: true,
+    priority: 3
+  },
+  {
+    id: 'backup-server-4',
+    label: 'Backup Server 4 (Cold Standby / Offline Shield)',
+    url: configuredServers[2] || '',
+    role: configuredServers[2]?.includes('workers.dev') ? 'edge-worker' : 'secondary',
+    tier: 'backup',
+    enabled: true,
+    priority: 4
+  }
+];
 
-const loadRuntimeOrigins = (): string[] => {
+const RUNTIME_CLUSTER_KEY = 'freshveggie_ha_cluster_v2';
+const CIRCUIT_BREAKER_COOLDOWN_MS = 15_000;
+
+const loadRuntimeNodes = (): RuntimeServerNode[] => {
   try {
-    const raw = localStorage.getItem(RUNTIME_ORIGINS_KEY);
-    if (!raw) return ['', ...configuredServers.filter((s) => s !== '')];
-    const parsed = JSON.parse(raw) as string[];
-    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    const raw = localStorage.getItem(RUNTIME_CLUSTER_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as RuntimeServerNode[];
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
   } catch {
     // ignore storage errors
   }
-  return ['', ...configuredServers.filter((s) => s !== '')];
+  return DEFAULT_CLUSTER_NODES;
 };
 
-let activeApiBases: string[] = loadRuntimeOrigins();
+let activeClusterNodes: RuntimeServerNode[] = loadRuntimeNodes();
 let autoFailoverEnabled = true;
+let primaryRoundRobinCursor = 0;
+let lastServedNodeId = 'primary-server-1';
+const circuitCooldownUntil = new Map<string, number>();
 
 export function syncRuntimeServerNodes(
-  nodes: Array<{ url: string; enabled: boolean }>,
+  nodes: Array<{
+    id?: string;
+    label?: string;
+    url: string;
+    role?: 'primary' | 'secondary' | 'edge-worker';
+    tier?: 'primary' | 'backup';
+    enabled: boolean;
+    priority?: number;
+  }>,
   autoFailover = true
 ): void {
   autoFailoverEnabled = autoFailover;
-  const normalized = nodes
+  const enabledNodes = nodes
     .filter((n) => n.enabled)
-    .map((n) => (n.url || '').trim().replace(/\/+$/, ''));
-  const merged = Array.from(new Set([...normalized, ...configuredServers]));
-  activeApiBases = merged.length > 0 ? merged : [''];
+    .map((n, idx): RuntimeServerNode => {
+      const role = n.role || (idx < 2 ? 'primary' : 'secondary');
+      return {
+        id: n.id || `server-${idx + 1}`,
+        label: n.label || `Server ${idx + 1}`,
+        url: (n.url || '').trim().replace(/\/+$/, ''),
+        role,
+        tier: n.tier || (role === 'primary' ? 'primary' : 'backup'),
+        enabled: true,
+        priority: n.priority || idx + 1
+      };
+    })
+    .sort((a, b) => a.priority - b.priority);
+
+  activeClusterNodes = enabledNodes.length > 0 ? enabledNodes : DEFAULT_CLUSTER_NODES;
   try {
-    localStorage.setItem(RUNTIME_ORIGINS_KEY, JSON.stringify(activeApiBases));
+    localStorage.setItem(RUNTIME_CLUSTER_KEY, JSON.stringify(activeClusterNodes));
   } catch {
     // ignore
   }
 }
 
 export async function refreshRuntimeServerNodes(): Promise<void> {
-  try {
-    const res = await fetch('/api/public/runtime-config', {
-      signal: AbortSignal.timeout(3000)
-    });
-    if (!res.ok) return;
-    const data = (await res.json()) as {
-      autoServerFailover?: boolean;
-      serverNodes?: Array<{ url: string; enabled: boolean }>;
-    };
-    if (Array.isArray(data.serverNodes)) {
-      syncRuntimeServerNodes(data.serverNodes, data.autoServerFailover !== false);
+  const candidates = Array.from(
+    new Set(['', ...activeClusterNodes.map((n) => n.url), ...configuredServers])
+  );
+  for (const base of candidates) {
+    try {
+      const res = await fetch(`${base}/api/public/runtime-config`, {
+        signal: AbortSignal.timeout(3000)
+      });
+      if (!res.ok) continue;
+      const data = (await res.json()) as {
+        autoServerFailover?: boolean;
+        serverNodes?: RuntimeServerNode[];
+      };
+      if (Array.isArray(data.serverNodes) && data.serverNodes.length > 0) {
+        syncRuntimeServerNodes(data.serverNodes, data.autoServerFailover !== false);
+        return;
+      }
+    } catch {
+      // try next server origin
     }
-  } catch {
-    // non-fatal
   }
+}
+
+export function getClusterRuntimeStatus(): {
+  lastServedNodeId: string;
+  nodeCount: number;
+  autoFailoverEnabled: boolean;
+} {
+  return {
+    lastServedNodeId,
+    nodeCount: activeClusterNodes.length,
+    autoFailoverEnabled
+  };
+}
+
+function buildOrderedCandidateTargets(): Array<{ id: string; url: string }> {
+  const now = Date.now();
+  const isHealthy = (id: string) => (circuitCooldownUntil.get(id) || 0) <= now;
+
+  const primaries = activeClusterNodes.filter(
+    (n) => n.enabled && (n.role === 'primary' || n.tier === 'primary')
+  );
+  const backups = activeClusterNodes.filter(
+    (n) => n.enabled && n.role !== 'primary' && n.tier !== 'primary'
+  );
+
+  // Rotate primary nodes only when distinct external URLs exist
+  const orderedPrimaries = [...primaries];
+  if (orderedPrimaries.length > 1) {
+    const distinctPrimaryUrls = new Set(orderedPrimaries.map((n) => n.url));
+    if (distinctPrimaryUrls.size > 1) {
+      primaryRoundRobinCursor = (primaryRoundRobinCursor + 1) % orderedPrimaries.length;
+      const rotated = [
+        ...orderedPrimaries.slice(primaryRoundRobinCursor),
+        ...orderedPrimaries.slice(0, primaryRoundRobinCursor)
+      ];
+      orderedPrimaries.splice(0, orderedPrimaries.length, ...rotated);
+    }
+  }
+
+  const allOrdered = [...orderedPrimaries, ...backups];
+  if (!autoFailoverEnabled && allOrdered.length > 0) {
+    return [{ id: allOrdered[0].id, url: allOrdered[0].url }];
+  }
+
+  // Deduplicate identical URLs after picking healthy first, keeping up to 1 fast same-origin retry
+  const healthyFirst = [
+    ...allOrdered.filter((n) => isHealthy(n.id)),
+    ...allOrdered.filter((n) => !isHealthy(n.id))
+  ];
+
+  const seenUrls = new Set<string>();
+  const targets: Array<{ id: string; url: string }> = [];
+  for (const node of healthyFirst) {
+    if (!seenUrls.has(node.url)) {
+      seenUrls.add(node.url);
+      targets.push({ id: node.id, url: node.url });
+    }
+  }
+
+  // Guarantee at least 2 resilient attempts even when all 4 nodes share same-origin during a brief blip
+  if (targets.length === 1 && autoFailoverEnabled) {
+    targets.push({ id: 'backup-retry', url: targets[0].url });
+  }
+  return targets.length > 0 ? targets : [{ id: 'primary-server-1', url: '' }];
 }
 
 export async function apiFetch(
@@ -68,34 +213,49 @@ export async function apiFetch(
   timeoutMs = 5500
 ): Promise<Response> {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
-  const basesToTry = autoFailoverEnabled ? activeApiBases : [activeApiBases[0] ?? ''];
+  const targets = buildOrderedCandidateTargets();
   let lastError: unknown = null;
   let lastResponse: Response | null = null;
 
-  for (const base of basesToTry) {
+  for (let i = 0; i < targets.length; i++) {
+    const target = targets[i];
+    const isLastAttempt = i === targets.length - 1;
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const response = await fetch(`${base}${normalizedPath}`, {
+      const response = await fetch(`${target.url}${normalizedPath}`, {
         ...init,
         signal: init.signal || controller.signal
       });
       window.clearTimeout(timer);
 
-      if (response.status >= 502 && response.status <= 504 && base !== basesToTry[basesToTry.length - 1]) {
+      if ((response.status >= 500 || response.status === 429) && !isLastAttempt) {
+        circuitCooldownUntil.set(target.id, Date.now() + CIRCUIT_BREAKER_COOLDOWN_MS);
         lastResponse = response;
+        if (target.id === 'backup-retry' || targets[i + 1]?.url === target.url) {
+          await new Promise((r) => window.setTimeout(r, 180));
+        }
         continue;
       }
+
+      circuitCooldownUntil.delete(target.id);
+      lastServedNodeId = target.id;
       return response;
     } catch (err) {
       window.clearTimeout(timer);
+      circuitCooldownUntil.set(target.id, Date.now() + CIRCUIT_BREAKER_COOLDOWN_MS);
       lastError = err;
+      if (!isLastAttempt && (target.id === 'backup-retry' || targets[i + 1]?.url === target.url)) {
+        await new Promise((r) => window.setTimeout(r, 180));
+      }
     }
   }
 
   if (lastResponse) return lastResponse;
-  throw lastError instanceof Error ? lastError : new Error('All configured API servers are unreachable.');
+  throw lastError instanceof Error
+    ? lastError
+    : new Error('All 4 Primary and Backup servers are temporarily unreachable.');
 }
 
 export async function adminApiFetch(
