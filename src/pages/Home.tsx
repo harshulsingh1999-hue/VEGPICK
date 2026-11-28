@@ -376,13 +376,17 @@ export const Home = () => {
                       {banner.subtitle}
                     </p>
                     <button
-                      onClick={() => {
+                      onClick={async () => {
                         try {
-                          navigator.clipboard?.writeText(banner.code);
-                          showToast(
-                            `Coupon ${banner.code} copied! Apply at checkout.`,
-                            'success'
-                          );
+                          if (navigator.clipboard?.writeText) {
+                            await navigator.clipboard.writeText(banner.code);
+                            showToast(
+                              `Coupon ${banner.code} copied! Apply at checkout.`,
+                              'success'
+                            );
+                          } else {
+                            showToast(`Code: ${banner.code}`, 'info');
+                          }
                         } catch {
                           showToast(`Code: ${banner.code}`, 'info');
                         }

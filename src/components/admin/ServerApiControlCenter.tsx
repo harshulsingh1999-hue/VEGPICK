@@ -197,7 +197,6 @@ export const ServerApiControlCenter: React.FC = () => {
 
   const [newNodeLabel, setNewNodeLabel] = useState('');
   const [newNodeUrl, setNewNodeUrl] = useState('');
-  const [newNodeRegion, setNewNodeRegion] = useState('global-edge');
   const [newNodeRole, setNewNodeRole] = useState<'primary' | 'secondary' | 'edge-worker'>('edge-worker');
 
   const normalizeConfig = (cfg: ServerControlConfig): ServerControlConfig => ({
@@ -954,7 +953,7 @@ export const ServerApiControlCenter: React.FC = () => {
                 id: `node_${Date.now().toString(36)}`,
                 label: newNodeLabel.trim() || 'Extra Backup Server',
                 url: cleanUrl,
-                region: newNodeRegion.trim() || 'global-edge',
+                region: 'global-edge',
                 role: newNodeRole,
                 tier: newNodeRole === 'primary' ? 'primary' : 'backup',
                 freeUnlimited: true,

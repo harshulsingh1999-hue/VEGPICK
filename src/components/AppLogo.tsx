@@ -1,5 +1,4 @@
 import React, { useState } from 'react';
-import freshVeggieLogoImg from '../assets/images/freshveggie_real_bag_logo_1795292735942.jpg';
 
 interface AppLogoProps {
   size?: number;
@@ -29,7 +28,7 @@ export const AppLogo: React.FC<AppLogoProps> = ({
           if (src === '/app-logo.png') {
             setSrc('/pwa-512x512.png');
           } else if (src === '/pwa-512x512.png') {
-            setSrc(freshVeggieLogoImg);
+            setSrc('/pwa-192x192.png');
           }
         }}
         className="w-full h-full object-cover"

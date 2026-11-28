@@ -215,38 +215,59 @@ async function startServer() {
     });
   });
 
+  let catalogResponseCache: {
+    generatedAt: string;
+    source: string;
+    etag: string;
+    json: string;
+  } | null = null;
+
   // Edge-Cached Storefront Bootstrap API (eliminates millions of direct Firestore reads at 1M DAU)
   app.get('/api/catalog/bootstrap', async (req, res) => {
     const payload = await cloud.getCatalogBootstrap();
     const ttlSec = cloud.getServerControlConfig().catalogTtlSeconds || 120;
-    const etag = `"${crypto
-      .createHash('sha1')
-      .update(
-        JSON.stringify({
-          p: payload.products,
-          c: payload.coupons,
-          a: payload.serviceAreas,
-          s: payload.settings
-        })
-      )
-      .digest('hex')}"`;
+
+    if (
+      !catalogResponseCache ||
+      catalogResponseCache.generatedAt !== payload.generatedAt ||
+      catalogResponseCache.source !== payload.source
+    ) {
+      const etag = `"${crypto
+        .createHash('sha1')
+        .update(
+          JSON.stringify({
+            p: payload.products,
+            c: payload.coupons,
+            a: payload.serviceAreas,
+            s: payload.settings
+          })
+        )
+        .digest('hex')}"`;
+      catalogResponseCache = {
+        generatedAt: payload.generatedAt,
+        source: payload.source,
+        etag,
+        json: JSON.stringify(payload)
+      };
+    }
 
     res.setHeader(
       'Cache-Control',
       `public, max-age=30, s-maxage=${ttlSec}, stale-while-revalidate=600`
     );
-    res.setHeader('ETag', etag);
+    res.setHeader('ETag', catalogResponseCache.etag);
     res.setHeader('X-Catalog-Source', payload.source);
 
-    if (req.headers['if-none-match'] === etag) {
+    if (req.headers['if-none-match'] === catalogResponseCache.etag) {
       res.status(304).end();
       return;
     }
 
-    res.json(payload);
+    res.type('application/json').send(catalogResponseCache.json);
   });
 
   app.post('/api/catalog/invalidate', applyRateLimit('invalidate', 60), async (_req, res) => {
+    catalogResponseCache = null;
     await cloud.invalidateCatalogCache();
     res.json({ ok: true });
   });
@@ -276,6 +297,30 @@ async function startServer() {
 
     if (buffer.byteLength === 0 || buffer.byteLength > 300 * 1024) {
       res.status(413).json({ error: 'Compressed image must be between 1 byte and 300 KB.' });
+      return;
+    }
+
+    const isPng =
+      ext === 'png' &&
+      buffer.byteLength >= 8 &&
+      buffer[0] === 0x89 &&
+      buffer[1] === 0x50 &&
+      buffer[2] === 0x4e &&
+      buffer[3] === 0x47;
+    const isJpg =
+      ext === 'jpg' &&
+      buffer.byteLength >= 3 &&
+      buffer[0] === 0xff &&
+      buffer[1] === 0xd8 &&
+      buffer[2] === 0xff;
+    const isWebp =
+      ext === 'webp' &&
+      buffer.byteLength >= 12 &&
+      buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+      buffer.subarray(8, 12).toString('ascii') === 'WEBP';
+
+    if (!isPng && !isJpg && !isWebp) {
+      res.status(400).json({ error: 'Uploaded binary does not match the declared image format.' });
       return;
     }
 
@@ -441,8 +486,17 @@ async function startServer() {
     res.json({ ok: true, verifiedCount: items.length, catalogSource: bootstrap.source, matchedArea });
   });
 
-  // Server-side Pricing & Order Quote Verification API (L1/L2 TTL cached)
-  app.post('/api/orders/quote', applyRateLimit('quote', 60), async (req, res) => {
+  interface QuoteValue {
+    subtotal: number;
+    taxAmount: number;
+    deliveryFee: number;
+    discount: number;
+    total: number;
+  }
+  const quoteLocalCache = new Map<string, { value: QuoteValue; expiresAt: number }>();
+
+  // Server-side Pricing & Order Quote Verification API (Dedicated L1 bounded cache; avoids Upstash/catalog eviction at 1M DAU)
+  app.post('/api/orders/quote', applyRateLimit('quote', 60), (req, res) => {
     const body = (req.body || {}) as QuoteRequestBody;
     const items = Array.isArray(body.items) ? body.items.slice(0, 50) : [];
     const taxRate = Math.max(0, Math.min(50, Number(body.taxRate) || 0));
@@ -452,7 +506,7 @@ async function startServer() {
     const discountValue = Math.max(0, Number(body.discountValue) || 0);
     const minOrder = Math.max(0, Number(body.minOrder) || 0);
 
-    const normalizedKey = JSON.stringify({
+    const cacheKey = JSON.stringify({
       items: items.map((i) => ({
         p: Math.max(0, Number(i.pricePerKg) || 0),
         w: Math.max(0, Number(i.selectedWeight) || 0),
@@ -465,16 +519,10 @@ async function startServer() {
       discountValue,
       minOrder
     });
-    const cacheKey = `quote_${normalizedKey}`;
-    const cached = await cloud.getCached<{
-      subtotal: number;
-      taxAmount: number;
-      deliveryFee: number;
-      discount: number;
-      total: number;
-    }>(cacheKey);
-    if (cached) {
-      res.setHeader('X-Cache', `HIT-${cached.tier.toUpperCase()}`);
+    const now = Date.now();
+    const cached = quoteLocalCache.get(cacheKey);
+    if (cached && now <= cached.expiresAt) {
+      res.setHeader('X-Cache', 'HIT-L1');
       res.json(cached.value);
       return;
     }
@@ -498,7 +546,7 @@ async function startServer() {
     }
 
     const total = Math.max(0, Math.round(subtotal) + taxAmount + deliveryFee - discount);
-    const quote = {
+    const quote: QuoteValue = {
       subtotal: Math.round(subtotal),
       taxAmount,
       deliveryFee,
@@ -506,12 +554,18 @@ async function startServer() {
       total
     };
     const quoteTtlSec = cloud.getServerControlConfig().quoteTtlSeconds || 30;
-    await cloud.setCached(cacheKey, quote, quoteTtlSec * 1000);
+    if (quoteLocalCache.size >= 500) {
+      const oldest = quoteLocalCache.keys().next().value;
+      if (oldest) quoteLocalCache.delete(oldest);
+    }
+    quoteLocalCache.set(cacheKey, { value: quote, expiresAt: now + quoteTtlSec * 1000 });
     res.setHeader('X-Cache', 'MISS');
     res.json(quote);
   });
 
   // Multi-Database Relational Archive & SQL Analytics Endpoints (SQLite WAL + Supabase Postgres)
+  let analyticsMemo: { json: string; expiresAt: number } | null = null;
+
   app.post('/api/archive/order', applyRateLimit('archive', 60), async (req, res) => {
     const b = (req.body || {}) as Record<string, unknown>;
     const id = typeof b.id === 'string' ? b.id.trim().slice(0, 128) : '';
@@ -521,6 +575,7 @@ async function startServer() {
       return;
     }
 
+    analyticsMemo = null;
     await cloud.archiveOrder({
       id,
       userId,
@@ -545,6 +600,7 @@ async function startServer() {
       return;
     }
 
+    analyticsMemo = null;
     await cloud.archiveLedgerEntry({
       id,
       partnerUid,
@@ -557,7 +613,16 @@ async function startServer() {
 
   app.get('/api/analytics/summary', (_req, res) => {
     res.setHeader('Cache-Control', 'public, max-age=15, stale-while-revalidate=45');
-    res.json(cloud.getSqlAnalyticsSummary());
+    const now = Date.now();
+    if (analyticsMemo && now <= analyticsMemo.expiresAt) {
+      res.setHeader('X-Cache', 'HIT-L1');
+      res.type('application/json').send(analyticsMemo.json);
+      return;
+    }
+    const json = JSON.stringify(cloud.getSqlAnalyticsSummary());
+    analyticsMemo = { json, expiresAt: now + 5000 };
+    res.setHeader('X-Cache', 'MISS');
+    res.type('application/json').send(json);
   });
 
   // Super Admin Database Control Center APIs
@@ -754,11 +819,30 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const httpServer = app.listen(PORT, '0.0.0.0', () => {
     console.log(
       `FreshVeggie server listening on http://0.0.0.0:${PORT} (${isProduction ? 'production' : 'development'})`
     );
   });
+
+  let shuttingDown = false;
+  const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    cloud.close();
+    httpServer.close(() => {
+      process.exit(0);
+    });
+    const forceTimer = setTimeout(() => {
+      process.exit(0);
+    }, 2000);
+    if (typeof forceTimer.unref === 'function') {
+      forceTimer.unref();
+    }
+  };
+
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
 }
 
 startServer().catch((err) => {

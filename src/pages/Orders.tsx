@@ -125,8 +125,12 @@ export const Orders = () => {
     try {
       await updateOrderStatus(orderId, 'cancelled');
       showToast(`Order #${orderId} has been cancelled.`, 'info');
-    } catch {
-      showToast('Unable to cancel order right now. Please try again.', 'error');
+    } catch (err) {
+      const msg =
+        err instanceof Error && !err.message.trim().startsWith('{')
+          ? err.message
+          : 'Unable to cancel order right now. Please try again.';
+      showToast(msg, 'error');
     } finally {
       setCancellingOrderId(null);
     }

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Home, IndianRupee, TrendingUp, User } from 'lucide-react';
+import { Home, IndianRupee, TrendingUp } from 'lucide-react';
 
 export const DeliveryNavbar = () => {
   const location = useLocation();

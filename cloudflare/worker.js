@@ -10,7 +10,12 @@
  *   BACKUP_ORIGIN_4  = "https://your-backup-server-4.koyeb.app"       (optional)
  */
 
-const CACHEABLE_GET_PATHS = new Set(['/api/catalog/bootstrap', '/api/slots']);
+const CACHEABLE_GET_PATHS = new Set([
+  '/api/catalog/bootstrap',
+  '/api/slots',
+  '/api/public/runtime-config',
+  '/api/analytics/summary'
+]);
 let primaryPointer = 0;
 
 export default {

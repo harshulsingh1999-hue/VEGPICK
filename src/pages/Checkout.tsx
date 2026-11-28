@@ -193,6 +193,9 @@ export const Checkout = () => {
   const copyPaymentField = async (value: string, label: string) => {
     if (!value) return;
     try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error('Clipboard unavailable');
+      }
       await navigator.clipboard.writeText(value);
       showToast(`${label} copied!`, 'success');
     } catch {

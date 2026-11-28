@@ -11,9 +11,12 @@ export const Coupons = () => {
 
   const activeCoupons = coupons.filter(c => c.isActive);
 
-  const copyCode = (code: string) => {
+  const copyCode = async (code: string) => {
     try {
-      navigator.clipboard.writeText(code);
+      if (!navigator.clipboard?.writeText) {
+        throw new Error('Clipboard unavailable');
+      }
+      await navigator.clipboard.writeText(code);
       showToast(`Coupon ${code} copied to clipboard!`, 'success');
     } catch {
       showToast(`Coupon code is ${code}`, 'info');

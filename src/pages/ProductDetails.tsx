@@ -16,7 +16,7 @@ import {
 
 export const ProductDetails = () => {
   const { id } = useParams();
-  const { products, addToCart } = useStore();
+  const { products, productsLoading, addToCart } = useStore();
   const { showToast } = useToast();
   const [selectedWeight, setSelectedWeight] = useState(1000);
   const [activeImageIndex, setActiveImageIndex] = useState(0);
@@ -27,9 +27,18 @@ export const ProductDetails = () => {
     setActiveImageIndex(0);
   }, [id]);
 
+  if (productsLoading && !product) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen gap-3">
+        <div className="w-8 h-8 border-4 border-green-600 border-t-transparent rounded-full animate-spin" />
+        <p className="text-sm text-gray-500">Loading product details...</p>
+      </div>
+    );
+  }
+
   if (!product) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen">
+      <div className="flex flex-col items-center justify-center min-h-screen px-4 text-center">
         <p className="text-gray-500 mb-4">Product not found</p>
         <Link to="/home" className="text-green-600 font-medium">
           Back to Home
@@ -50,9 +59,9 @@ export const ProductDetails = () => {
   };
 
   return (
-    <div className="pb-24 bg-white min-h-screen max-w-4xl mx-auto">
+    <div className="pb-44 md:pb-28 bg-white min-h-screen max-w-4xl mx-auto">
       {/* Header */}
-      <div className="fixed top-0 left-0 right-0 p-4 flex justify-between items-center z-20 max-w-4xl mx-auto pointer-events-none">
+      <div className="fixed top-0 md:top-16 left-0 right-0 p-4 safe-top flex justify-between items-center z-20 max-w-4xl mx-auto pointer-events-none">
         <Link
           to="/home"
           aria-label="Back to Home"
@@ -229,8 +238,8 @@ export const ProductDetails = () => {
         </div>
       </div>
 
-      {/* Bottom Action */}
-      <div className="fixed bottom-0 left-0 right-0 p-4 bg-white border-t border-gray-100 flex items-center gap-4 z-20 max-w-4xl mx-auto">
+      {/* Bottom Action (clears mobile bottom Navbar and device home indicator) */}
+      <div className="fixed bottom-[calc(58px+env(safe-area-inset-bottom,0px))] md:bottom-0 left-0 right-0 p-4 md:safe-bottom bg-white border-t border-gray-100 flex items-center gap-4 z-40 max-w-4xl mx-auto shadow-lg md:shadow-none">
         <div className="flex-1">
           <p className="text-xs text-gray-500">Total Price</p>
           <p className="text-xl font-bold text-gray-900 tabular-nums">{formatCurrency(price)}</p>

@@ -214,57 +214,284 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
   // SQLite Embedded WAL Edge Replica (zero-cost per-node relational DB & analytics)
+  // Includes automatic corruption detection (PRAGMA integrity_check) & clean B-tree salvage rebuild
   const sqlitePath = path.join(dataDir, 'edge_replica.db');
-  const sqlite = new Database(sqlitePath);
-  sqlite.pragma('journal_mode = WAL');
-  sqlite.pragma('synchronous = NORMAL');
-  sqlite.exec(`
-    CREATE TABLE IF NOT EXISTS catalog_snapshot (
-      id TEXT PRIMARY KEY,
-      payload TEXT NOT NULL,
-      updated_at INTEGER NOT NULL
+  const VALID_CONTROL_KEYS = new Set([
+    'db_control',
+    'server_control',
+    'cleanup_control',
+    'app_diagnostics_control'
+  ]);
+
+  const initSqliteSchema = (db: Database.Database): void => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS catalog_snapshot (
+        id TEXT PRIMARY KEY,
+        payload TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS order_archive (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        city TEXT NOT NULL DEFAULT '',
+        total INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'placed',
+        payment_method TEXT NOT NULL DEFAULT 'cod',
+        payment_status TEXT NOT NULL DEFAULT 'pending',
+        assigned_to_uid TEXT NOT NULL DEFAULT '',
+        item_count INTEGER NOT NULL DEFAULT 0,
+        order_date TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_order_archive_status ON order_archive(status);
+      CREATE INDEX IF NOT EXISTS idx_order_archive_city ON order_archive(city);
+      CREATE TABLE IF NOT EXISTS wallet_ledger_archive (
+        id TEXT PRIMARY KEY,
+        partner_uid TEXT NOT NULL,
+        order_id TEXT NOT NULL DEFAULT '',
+        type TEXT NOT NULL,
+        amount INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_ledger_partner ON wallet_ledger_archive(partner_uid);
+      CREATE TABLE IF NOT EXISTS cloud_control_config (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS api_quota_usage (
+        endpoint_id TEXT NOT NULL,
+        day_key TEXT NOT NULL,
+        calls_total INTEGER NOT NULL DEFAULT 0,
+        rate_limited INTEGER NOT NULL DEFAULT 0,
+        cache_hits INTEGER NOT NULL DEFAULT 0,
+        error_count INTEGER NOT NULL DEFAULT 0,
+        latency_sum_ms INTEGER NOT NULL DEFAULT 0,
+        last_called_at TEXT,
+        PRIMARY KEY (endpoint_id, day_key)
+      );
+      CREATE TABLE IF NOT EXISTS app_diagnostic_events (
+        id TEXT PRIMARY KEY,
+        platform TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        category TEXT NOT NULL,
+        message TEXT NOT NULL,
+        route TEXT NOT NULL DEFAULT '',
+        user_agent TEXT NOT NULL DEFAULT '',
+        resolved INTEGER NOT NULL DEFAULT 0,
+        auto_healed INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_diag_platform_created ON app_diagnostic_events(platform, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_diag_resolved ON app_diagnostic_events(resolved, created_at DESC);
+    `);
+  };
+
+  let sqliteRecoveredReason: string | null = null;
+
+  const openHealthySqlite = (): Database.Database => {
+    const db = new Database(sqlitePath);
+    db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = NORMAL');
+    db.pragma('busy_timeout = 5000');
+    initSqliteSchema(db);
+
+    let healthy = false;
+    try {
+      const integrity = db.pragma('integrity_check', { simple: true });
+      healthy = integrity === 'ok';
+      if (!healthy) {
+        sqliteRecoveredReason = `integrity_check returned ${String(integrity)}`;
+      }
+    } catch (err) {
+      sqliteRecoveredReason = err instanceof Error ? err.message : 'integrity_check failed';
+      healthy = false;
+    }
+
+    if (healthy) {
+      return db;
+    }
+
+    // Salvage intact rows per table before rebuilding clean SQLite file
+    let salvagedCatalog: Array<{ id: string; payload: string; updated_at: number }> = [];
+    let salvagedOrders: Array<Record<string, unknown>> = [];
+    let salvagedLedger: Array<Record<string, unknown>> = [];
+    let salvagedConfigs: Array<{ key: string; value: string; updated_at: number }> = [];
+    let salvagedDiags: Array<Record<string, unknown>> = [];
+
+    try {
+      salvagedCatalog = (
+        db.prepare("SELECT id, payload, updated_at FROM catalog_snapshot WHERE id = 'storefront'").all() as Array<{
+          id: string;
+          payload: string;
+          updated_at: number;
+        }>
+      ).filter((r) => {
+        try {
+          return typeof r.payload === 'string' && Boolean(JSON.parse(r.payload));
+        } catch {
+          return false;
+        }
+      });
+    } catch {
+      salvagedCatalog = [];
+    }
+
+    try {
+      salvagedOrders = (
+        db
+          .prepare(
+            'SELECT id, user_id, city, total, status, payment_method, payment_status, assigned_to_uid, item_count, order_date, updated_at FROM order_archive'
+          )
+          .all() as Array<Record<string, unknown>>
+      ).filter((r) => typeof r.id === 'string' && r.id.length > 0 && typeof r.user_id === 'string' && r.user_id.length > 0);
+    } catch {
+      salvagedOrders = [];
+    }
+
+    try {
+      salvagedLedger = (
+        db
+          .prepare('SELECT id, partner_uid, order_id, type, amount, created_at FROM wallet_ledger_archive')
+          .all() as Array<Record<string, unknown>>
+      ).filter((r) => typeof r.id === 'string' && r.id.length > 0 && typeof r.partner_uid === 'string' && r.partner_uid.length > 0);
+    } catch {
+      salvagedLedger = [];
+    }
+
+    try {
+      salvagedConfigs = (
+        db.prepare('SELECT key, value, updated_at FROM cloud_control_config').all() as Array<{
+          key: string;
+          value: string;
+          updated_at: number;
+        }>
+      ).filter((r) => {
+        if (!VALID_CONTROL_KEYS.has(String(r.key))) return false;
+        try {
+          const parsed = JSON.parse(String(r.value));
+          return Boolean(parsed && typeof parsed === 'object' && !Array.isArray(parsed));
+        } catch {
+          return false;
+        }
+      });
+    } catch {
+      salvagedConfigs = [];
+    }
+
+    try {
+      salvagedDiags = (
+        db
+          .prepare(
+            'SELECT id, platform, severity, category, message, route, user_agent, resolved, auto_healed, created_at FROM app_diagnostic_events ORDER BY created_at DESC LIMIT 200'
+          )
+          .all() as Array<Record<string, unknown>>
+      ).filter((r) => typeof r.id === 'string' && r.id.length > 0 && typeof r.message === 'string' && r.message.length > 0);
+    } catch {
+      salvagedDiags = [];
+    }
+
+    try {
+      db.close();
+    } catch {
+      // ignore close errors on corrupt db
+    }
+
+    for (const suffix of ['', '-wal', '-shm']) {
+      const target = `${sqlitePath}${suffix}`;
+      try {
+        if (fs.existsSync(target)) fs.unlinkSync(target);
+      } catch {
+        // ignore unlink errors
+      }
+    }
+
+    const cleanDb = new Database(sqlitePath);
+    cleanDb.pragma('journal_mode = WAL');
+    cleanDb.pragma('synchronous = NORMAL');
+    cleanDb.pragma('busy_timeout = 5000');
+    initSqliteSchema(cleanDb);
+
+    const restoreTx = cleanDb.transaction(() => {
+      const insCatalog = cleanDb.prepare(
+        'INSERT OR REPLACE INTO catalog_snapshot (id, payload, updated_at) VALUES (?, ?, ?)'
+      );
+      for (const r of salvagedCatalog) {
+        insCatalog.run(r.id, r.payload, Number(r.updated_at) || Date.now());
+      }
+
+      const insOrder = cleanDb.prepare(
+        `INSERT OR REPLACE INTO order_archive
+          (id, user_id, city, total, status, payment_method, payment_status, assigned_to_uid, item_count, order_date, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      for (const o of salvagedOrders) {
+        insOrder.run(
+          String(o.id),
+          String(o.user_id),
+          String(o.city || ''),
+          Number(o.total) || 0,
+          String(o.status || 'placed'),
+          String(o.payment_method || 'cod'),
+          String(o.payment_status || 'pending'),
+          String(o.assigned_to_uid || ''),
+          Number(o.item_count) || 0,
+          String(o.order_date || ''),
+          Number(o.updated_at) || Date.now()
+        );
+      }
+
+      const insLedger = cleanDb.prepare(
+        `INSERT OR IGNORE INTO wallet_ledger_archive
+          (id, partner_uid, order_id, type, amount, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      );
+      for (const l of salvagedLedger) {
+        insLedger.run(
+          String(l.id),
+          String(l.partner_uid),
+          String(l.order_id || ''),
+          String(l.type || 'trip_credit'),
+          Number(l.amount) || 0,
+          Number(l.created_at) || Date.now()
+        );
+      }
+
+      const insCfg = cleanDb.prepare(
+        'INSERT OR REPLACE INTO cloud_control_config (key, value, updated_at) VALUES (?, ?, ?)'
+      );
+      for (const c of salvagedConfigs) {
+        insCfg.run(c.key, c.value, Number(c.updated_at) || Date.now());
+      }
+
+      const insDiag = cleanDb.prepare(
+        `INSERT OR IGNORE INTO app_diagnostic_events
+          (id, platform, severity, category, message, route, user_agent, resolved, auto_healed, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      for (const d of salvagedDiags) {
+        insDiag.run(
+          String(d.id),
+          String(d.platform || 'web'),
+          String(d.severity || 'info'),
+          String(d.category || 'runtime'),
+          String(d.message),
+          String(d.route || ''),
+          String(d.user_agent || ''),
+          Number(d.resolved) ? 1 : 0,
+          Number(d.auto_healed) ? 1 : 0,
+          Number(d.created_at) || Date.now()
+        );
+      }
+    });
+    restoreTx();
+    console.warn(
+      `[cloudStack] Rebuilt SQLite WAL edge replica cleanly (${sqliteRecoveredReason || 'corrupt page'}); salvaged ${salvagedOrders.length} orders, ${salvagedLedger.length} ledger rows, ${salvagedCatalog.length} catalog snapshot.`
     );
-    CREATE TABLE IF NOT EXISTS order_archive (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      city TEXT NOT NULL DEFAULT '',
-      total INTEGER NOT NULL DEFAULT 0,
-      status TEXT NOT NULL DEFAULT 'placed',
-      payment_method TEXT NOT NULL DEFAULT 'cod',
-      payment_status TEXT NOT NULL DEFAULT 'pending',
-      assigned_to_uid TEXT NOT NULL DEFAULT '',
-      item_count INTEGER NOT NULL DEFAULT 0,
-      order_date TEXT NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_order_archive_status ON order_archive(status);
-    CREATE INDEX IF NOT EXISTS idx_order_archive_city ON order_archive(city);
-    CREATE TABLE IF NOT EXISTS wallet_ledger_archive (
-      id TEXT PRIMARY KEY,
-      partner_uid TEXT NOT NULL,
-      order_id TEXT NOT NULL DEFAULT '',
-      type TEXT NOT NULL,
-      amount INTEGER NOT NULL DEFAULT 0,
-      created_at INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_ledger_partner ON wallet_ledger_archive(partner_uid);
-    CREATE TABLE IF NOT EXISTS cloud_control_config (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS api_quota_usage (
-      endpoint_id TEXT NOT NULL,
-      day_key TEXT NOT NULL,
-      calls_total INTEGER NOT NULL DEFAULT 0,
-      rate_limited INTEGER NOT NULL DEFAULT 0,
-      cache_hits INTEGER NOT NULL DEFAULT 0,
-      error_count INTEGER NOT NULL DEFAULT 0,
-      latency_sum_ms INTEGER NOT NULL DEFAULT 0,
-      last_called_at TEXT,
-      PRIMARY KEY (endpoint_id, day_key)
-    );
-  `);
+    return cleanDb;
+  };
+
+  const sqlite = openHealthySqlite();
 
   const parseHttpsUrl = (raw: string): URL | null => {
     if (!raw || !raw.startsWith('https://')) return null;
@@ -692,18 +919,61 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
   const minuteUsageMap = new Map<string, { slot: number; count: number; throttled: number }>();
   const cacheStats = { l1Hits: 0, l2Hits: 0, misses: 0 };
 
+  interface PendingUsageDelta {
+    endpointId: string;
+    dayKey: string;
+    callsTotal: number;
+    rateLimited: number;
+    cacheHits: number;
+    errorCount: number;
+    latencySumMs: number;
+    lastCalledAt: string;
+  }
+
   const upsertApiQuotaStmt = sqlite.prepare(`
     INSERT INTO api_quota_usage
       (endpoint_id, day_key, calls_total, rate_limited, cache_hits, error_count, latency_sum_ms, last_called_at)
-    VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(endpoint_id, day_key) DO UPDATE SET
-      calls_total = calls_total + 1,
+      calls_total = calls_total + excluded.calls_total,
       rate_limited = rate_limited + excluded.rate_limited,
       cache_hits = cache_hits + excluded.cache_hits,
       error_count = error_count + excluded.error_count,
       latency_sum_ms = latency_sum_ms + excluded.latency_sum_ms,
       last_called_at = excluded.last_called_at
   `);
+
+  const pendingUsageDeltas = new Map<string, PendingUsageDelta>();
+  const flushApiQuotaTx = sqlite.transaction((entries: PendingUsageDelta[]) => {
+    for (const d of entries) {
+      upsertApiQuotaStmt.run(
+        d.endpointId,
+        d.dayKey,
+        d.callsTotal,
+        d.rateLimited,
+        d.cacheHits,
+        d.errorCount,
+        d.latencySumMs,
+        d.lastCalledAt
+      );
+    }
+  });
+
+  const flushPendingApiUsage = (): void => {
+    if (pendingUsageDeltas.size === 0) return;
+    const snapshot = Array.from(pendingUsageDeltas.values());
+    pendingUsageDeltas.clear();
+    try {
+      flushApiQuotaTx(snapshot);
+    } catch {
+      // Non-blocking telemetry
+    }
+  };
+
+  const telemetryFlushTimer = setInterval(flushPendingApiUsage, 2000);
+  if (typeof telemetryFlushTimer.unref === 'function') {
+    telemetryFlushTimer.unref();
+  }
 
   const recordApiUsage = (
     endpointId: string,
@@ -730,7 +1000,31 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
       const isLimited = meta.rateLimited || meta.statusCode === 429 ? 1 : 0;
       const isCacheHit = meta.cacheHit ? 1 : 0;
       const isErr = typeof meta.statusCode === 'number' && meta.statusCode >= 500 ? 1 : 0;
-      upsertApiQuotaStmt.run(cleanId, dayKey, isLimited, isCacheHit, isErr, latency, nowIso);
+
+      const deltaKey = `${cleanId}::${dayKey}`;
+      const existingDelta = pendingUsageDeltas.get(deltaKey);
+      if (existingDelta) {
+        existingDelta.callsTotal += 1;
+        existingDelta.rateLimited += isLimited;
+        existingDelta.cacheHits += isCacheHit;
+        existingDelta.errorCount += isErr;
+        existingDelta.latencySumMs += latency;
+        existingDelta.lastCalledAt = nowIso;
+      } else {
+        pendingUsageDeltas.set(deltaKey, {
+          endpointId: cleanId,
+          dayKey,
+          callsTotal: 1,
+          rateLimited: isLimited,
+          cacheHits: isCacheHit,
+          errorCount: isErr,
+          latencySumMs: latency,
+          lastCalledAt: nowIso
+        });
+      }
+      if (pendingUsageDeltas.size >= 100) {
+        flushPendingApiUsage();
+      }
     } catch {
       // Non-blocking telemetry
     }
@@ -738,6 +1032,7 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
 
   const resetApiQuotaUsage = (): { ok: boolean; dayKey: string } => {
     const dayKey = new Date().toISOString().split('T')[0];
+    pendingUsageDeltas.clear();
     sqlite.prepare('DELETE FROM api_quota_usage WHERE day_key = ?').run(dayKey);
     minuteUsageMap.clear();
     cacheStats.l1Hits = 0;
@@ -905,8 +1200,15 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     }
 
     const now = Date.now();
-    if (rateBuckets.size > 2000) {
-      rateBuckets.clear();
+    if (rateBuckets.size > 5000) {
+      for (const [k, b] of rateBuckets.entries()) {
+        if (now > b.resetAt) rateBuckets.delete(k);
+      }
+      while (rateBuckets.size > 5000) {
+        const oldestKey = rateBuckets.keys().next().value;
+        if (!oldestKey) break;
+        rateBuckets.delete(oldestKey);
+      }
     }
     const existing = rateBuckets.get(key);
     if (!existing || now > existing.resetAt) {
@@ -1191,6 +1493,8 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     return null;
   };
 
+  let inFlightCatalogPromise: Promise<CatalogBootstrapPayload> | null = null;
+
   const getCatalogBootstrap = async (): Promise<CatalogBootstrapPayload> => {
     const cacheKey = 'catalog:bootstrap:v1';
     const ttlMs = (serverControlConfig.catalogTtlSeconds || 120) * 1000;
@@ -1293,31 +1597,46 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
       };
     }
 
-    const fresh = await fetchPublicCatalogFromFirestore();
-    if (fresh) {
-      await setCached(cacheKey, fresh, ttlMs);
-      return fresh;
+    // Single-flight coalescing prevents cache stampede / thundering herd at 1M active users
+    if (inFlightCatalogPromise) {
+      return inFlightCatalogPromise;
     }
 
-    if (dbControlConfig.autoFailoverEnabled) {
-      const snap = readSqliteSnapshot();
-      if (snap) {
-        recordFailoverEvent('firestore-rest', 'sqlite-replica', 'Automatic failover on Firestore timeout');
-        return snap;
+    inFlightCatalogPromise = (async () => {
+      try {
+        const fresh = await fetchPublicCatalogFromFirestore();
+        if (fresh) {
+          await setCached(cacheKey, fresh, ttlMs);
+          return fresh;
+        }
+
+        if (dbControlConfig.autoFailoverEnabled) {
+          const snap = readSqliteSnapshot();
+          if (snap) {
+            recordFailoverEvent('firestore-rest', 'sqlite-replica', 'Automatic failover on Firestore timeout');
+            await setCached(cacheKey, snap, Math.min(ttlMs, 30_000));
+            return snap;
+          }
+        }
+
+        return {
+          products: [],
+          coupons: [],
+          serviceAreas: [],
+          settings: null,
+          source: 'sqlite-replica',
+          generatedAt: new Date().toISOString()
+        };
+      } finally {
+        inFlightCatalogPromise = null;
       }
-    }
+    })();
 
-    return {
-      products: [],
-      coupons: [],
-      serviceAreas: [],
-      settings: null,
-      source: 'sqlite-replica',
-      generatedAt: new Date().toISOString()
-    };
+    return inFlightCatalogPromise;
   };
 
   const invalidateCatalogCache = async (): Promise<void> => {
+    inFlightCatalogPromise = null;
     await invalidateKey('catalog:bootstrap:v1');
   };
 
@@ -1772,45 +2091,55 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
   }
 
   const getSqlAnalyticsSummary = (): SqlAnalyticsSummary => {
-    const totals = sqlite
-      .prepare(
-        `SELECT
-           COUNT(*) AS totalOrders,
-           SUM(CASE WHEN status = 'delivered' THEN 1 ELSE 0 END) AS deliveredOrders,
-           SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelledOrders,
-           SUM(CASE WHEN status != 'cancelled' THEN total ELSE 0 END) AS grossRevenue,
-           SUM(CASE WHEN status != 'cancelled' AND payment_method = 'cod' THEN total ELSE 0 END) AS codRevenue,
-           SUM(CASE WHEN status != 'cancelled' AND payment_method = 'upi' THEN total ELSE 0 END) AS upiRevenue
-         FROM order_archive`
-      )
-      .get() as {
+    let totals: {
       totalOrders?: number;
       deliveredOrders?: number;
       cancelledOrders?: number;
       grossRevenue?: number;
       codRevenue?: number;
       upiRevenue?: number;
-    };
+    } = {};
+    let ledgerSum: { totalPayouts?: number } = {};
+    let topCities: Array<{ city: string; orderCount: number; revenue: number }> = [];
 
-    const ledgerSum = sqlite
-      .prepare(
-        `SELECT COALESCE(SUM(CASE WHEN type = 'trip_credit' THEN amount ELSE 0 END), 0) AS totalPayouts
-         FROM wallet_ledger_archive`
-      )
-      .get() as { totalPayouts?: number };
+    try {
+      totals =
+        (sqlite
+          .prepare(
+            `SELECT
+               COUNT(*) AS totalOrders,
+               SUM(CASE WHEN status = 'delivered' THEN 1 ELSE 0 END) AS deliveredOrders,
+               SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelledOrders,
+               SUM(CASE WHEN status != 'cancelled' THEN total ELSE 0 END) AS grossRevenue,
+               SUM(CASE WHEN status != 'cancelled' AND payment_method = 'cod' THEN total ELSE 0 END) AS codRevenue,
+               SUM(CASE WHEN status != 'cancelled' AND payment_method = 'upi' THEN total ELSE 0 END) AS upiRevenue
+             FROM order_archive`
+          )
+          .get() as typeof totals) || {};
 
-    const topCities = sqlite
-      .prepare(
-        `SELECT
-           CASE WHEN TRIM(city) = '' THEN 'Unspecified' ELSE city END AS city,
-           COUNT(*) AS orderCount,
-           SUM(CASE WHEN status != 'cancelled' THEN total ELSE 0 END) AS revenue
-         FROM order_archive
-         GROUP BY CASE WHEN TRIM(city) = '' THEN 'Unspecified' ELSE city END
-         ORDER BY orderCount DESC
-         LIMIT 5`
-      )
-      .all() as Array<{ city: string; orderCount: number; revenue: number }>;
+      ledgerSum =
+        (sqlite
+          .prepare(
+            `SELECT COALESCE(SUM(CASE WHEN type = 'trip_credit' THEN amount ELSE 0 END), 0) AS totalPayouts
+             FROM wallet_ledger_archive`
+          )
+          .get() as typeof ledgerSum) || {};
+
+      topCities = sqlite
+        .prepare(
+          `SELECT
+             CASE WHEN TRIM(city) = '' THEN 'Unspecified' ELSE city END AS city,
+             COUNT(*) AS orderCount,
+             SUM(CASE WHEN status != 'cancelled' THEN total ELSE 0 END) AS revenue
+           FROM order_archive
+           GROUP BY CASE WHEN TRIM(city) = '' THEN 'Unspecified' ELSE city END
+           ORDER BY orderCount DESC
+           LIMIT 5`
+        )
+        .all() as Array<{ city: string; orderCount: number; revenue: number }>;
+    } catch {
+      // Fall back to empty summary instead of throwing HTTP 500
+    }
 
     return {
       archivedOrders: Number(totals?.totalOrders || 0),
@@ -1988,18 +2317,20 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     const shmFileBytes = statSize(`${sqlitePath}-shm`);
     const totalSqliteBytes = dbFileBytes + walFileBytes + shmFileBytes;
 
-    const catalogRows = Number(
-      (sqlite.prepare('SELECT COUNT(*) AS c FROM catalog_snapshot').get() as { c?: number })?.c || 0
-    );
-    const orderRows = Number(
-      (sqlite.prepare('SELECT COUNT(*) AS c FROM order_archive').get() as { c?: number })?.c || 0
-    );
-    const ledgerRows = Number(
-      (sqlite.prepare('SELECT COUNT(*) AS c FROM wallet_ledger_archive').get() as { c?: number })?.c || 0
-    );
-    const cfgRows = Number(
-      (sqlite.prepare('SELECT COUNT(*) AS c FROM cloud_control_config').get() as { c?: number })?.c || 0
-    );
+    const safeCount = (tableName: string): number => {
+      try {
+        return Number(
+          (sqlite.prepare(`SELECT COUNT(*) AS c FROM ${tableName}`).get() as { c?: number })?.c || 0
+        );
+      } catch {
+        return 0;
+      }
+    };
+
+    const catalogRows = safeCount('catalog_snapshot');
+    const orderRows = safeCount('order_archive');
+    const ledgerRows = safeCount('wallet_ledger_archive');
+    const cfgRows = safeCount('cloud_control_config');
     const totalSqliteRows = catalogRows + orderRows + ledgerRows + cfgRows;
     const sqliteLatency = Math.max(1, Math.round(performance.now() - sqliteStart));
 
@@ -2026,6 +2357,7 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
       recordCount: totalSqliteRows,
       usageLabel: `${formatBytesHuman(totalSqliteBytes)} (${totalSqliteRows} rows)`,
       balanceLabel: diskAvailBytes !== null ? `${formatBytesHuman(diskAvailBytes)} OS Disk Free` : 'Local Volume Active',
+      statusNote: sqliteRecoveredReason ? `Auto-rebuilt clean WAL replica (${sqliteRecoveredReason})` : null,
       details: {
         dbFileBytes,
         walFileBytes,
@@ -2368,6 +2700,7 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
   };
 
   const getServersAndApisReport = (port: number) => {
+    flushPendingApiUsage();
     const mem = process.memoryUsage();
     const heapStats = v8.getHeapStatistics();
     const heapLimitBytes = heapStats.heap_size_limit || mem.heapTotal;
@@ -2984,9 +3317,44 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     writeControlJson
   });
 
+  if (sqliteRecoveredReason) {
+    try {
+      maintenance.recordDiagnosticEvent({
+        platform: 'server',
+        severity: 'warning',
+        category: 'sqlite_auto_heal',
+        message: `Auto-recovered corrupted SQLite WAL replica cleanly on boot (${sqliteRecoveredReason})`,
+        resolved: true,
+        autoHealed: true
+      });
+    } catch {
+      // non-fatal
+    }
+  }
+
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    clearInterval(telemetryFlushTimer);
+    maintenance.stopScheduler();
+    flushPendingApiUsage();
+    try {
+      sqlite.pragma('wal_checkpoint(TRUNCATE)');
+    } catch {
+      // ignore checkpoint failure during shutdown
+    }
+    try {
+      sqlite.close();
+    } catch {
+      // ignore close failure
+    }
+  };
+
   return {
     uploadsDir,
     maintenance,
+    close,
     getCached,
     setCached,
     invalidateCatalogCache,

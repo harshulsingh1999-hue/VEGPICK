@@ -3,8 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { 
   LayoutDashboard, Users, Truck, ShoppingCart, Package, 
   CreditCard, Tag, BarChart3, MessageSquare, Settings, LogOut, 
-  Menu, X, Shield, Plus, Search, Edit2, Trash2, Check, CheckCircle2,
-  AlertTriangle, Filter, Eye, Phone, MapPin, IndianRupee, ArrowUpRight, Sprout,
+  Menu, X, Shield, Plus, Search, Edit2, Trash2, CheckCircle2,
+  AlertTriangle, Eye, MapPin, ArrowUpRight, Sprout,
   Download, Upload, Monitor, Camera, Database, Server, Calendar, Clock, Landmark, Smartphone,
   ChevronLeft, ChevronRight, Wrench
 } from 'lucide-react';
@@ -22,7 +22,7 @@ import {
   isOnlinePaymentMethod,
   sanitizeProductImages
 } from '../../lib/utils';
-import { CATEGORIES, Product, Coupon, DeliveryPersonnel, Order } from '../../lib/data';
+import { CATEGORIES, Product, Order } from '../../lib/data';
 import { uploadCompressedMedia } from '../../lib/imageUtils';
 import { apiFetch } from '../../lib/apiClient';
 import { useToast } from '../../context/ToastContext';

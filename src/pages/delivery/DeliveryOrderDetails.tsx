@@ -256,8 +256,12 @@ export const DeliveryOrderDetails = () => {
       await updateDeliveryOrderStatus(assignedOrder.id, 'packed');
       setShowPickupModal(false);
       showToast('Package marked as picked up from hub', 'success');
-    } catch {
-      showToast('Unable to update pickup status. Please retry.', 'error');
+    } catch (err) {
+      const msg =
+        err instanceof Error && !err.message.trim().startsWith('{')
+          ? err.message
+          : 'Unable to update pickup status. Please retry.';
+      showToast(msg, 'error');
     } finally {
       setBusy(false);
     }
@@ -268,8 +272,12 @@ export const DeliveryOrderDetails = () => {
     try {
       await updateDeliveryOrderStatus(assignedOrder.id, 'out_for_delivery');
       showToast('Trip started — Live GPS sharing enabled!', 'info');
-    } catch {
-      showToast('Unable to start trip. Please retry.', 'error');
+    } catch (err) {
+      const msg =
+        err instanceof Error && !err.message.trim().startsWith('{')
+          ? err.message
+          : 'Unable to start trip. Please retry.';
+      showToast(msg, 'error');
     } finally {
       setBusy(false);
     }
@@ -314,8 +322,12 @@ export const DeliveryOrderDetails = () => {
       setShowDeliveryModal(false);
       showToast(`Order #${assignedOrder.id} delivered! +₹45 credited to wallet`, 'success');
       navigate('/delivery/dashboard');
-    } catch {
-      showToast('Could not complete delivery. Please check connection and retry.', 'error');
+    } catch (err) {
+      const msg =
+        err instanceof Error && !err.message.trim().startsWith('{')
+          ? err.message
+          : 'Could not complete delivery. Please check connection and retry.';
+      showToast(msg, 'error');
     } finally {
       setBusy(false);
     }
@@ -336,8 +348,12 @@ export const DeliveryOrderDetails = () => {
         'info'
       );
       navigate('/delivery/dashboard');
-    } catch {
-      showToast('Unable to submit failed return. Please retry.', 'error');
+    } catch (err) {
+      const msg =
+        err instanceof Error && !err.message.trim().startsWith('{')
+          ? err.message
+          : 'Unable to submit failed return. Please retry.';
+      showToast(msg, 'error');
     } finally {
       setBusy(false);
     }
@@ -351,8 +367,12 @@ export const DeliveryOrderDetails = () => {
         `Collected ${formatCurrency(assignedOrder.total)} cash for #${assignedOrder.id}`,
         'success'
       );
-    } catch {
-      showToast('Failed to record COD collection. Please retry.', 'error');
+    } catch (err) {
+      const msg =
+        err instanceof Error && !err.message.trim().startsWith('{')
+          ? err.message
+          : 'Failed to record COD collection. Please retry.';
+      showToast(msg, 'error');
     } finally {
       setBusy(false);
     }
@@ -542,6 +562,7 @@ export const DeliveryOrderDetails = () => {
           {isAssignedToMe &&
             assignedOrder.paymentMethod === 'cod' &&
             assignedOrder.paymentStatus !== 'collected' &&
+            assignedOrder.status !== 'delivered' &&
             assignedOrder.status !== 'cancelled' && (
               <button
                 disabled={busy}

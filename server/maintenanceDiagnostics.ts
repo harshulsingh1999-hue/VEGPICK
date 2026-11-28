@@ -701,7 +701,7 @@ export function createMaintenanceDiagnostics(deps: MaintenanceDeps) {
 
       // 2. Ensure SQLite catalog_snapshot is hydrated if empty & Firestore reachable
       try {
-        const snapRow = sqlite.prepare('SELECT payload FROM catalog_snapshot WHERE id = ?').get('public_v1') as
+        const snapRow = sqlite.prepare('SELECT payload FROM catalog_snapshot WHERE id = ?').get('storefront') as
           | { payload?: string }
           | undefined;
         let productCount = 0;
@@ -1125,6 +1125,10 @@ export function createMaintenanceDiagnostics(deps: MaintenanceDeps) {
     schedulerTimer.unref();
   }
 
+  const stopScheduler = () => {
+    clearInterval(schedulerTimer);
+  };
+
   return {
     recordDiagnosticEvent,
     resolveDiagnosticEvents,
@@ -1135,6 +1139,7 @@ export function createMaintenanceDiagnostics(deps: MaintenanceDeps) {
     getDiagnosticsControlConfig,
     updateDiagnosticsControlConfig,
     runCrossPlatformDiagnostics,
-    getMaintenanceOverview
+    getMaintenanceOverview,
+    stopScheduler
   };
 }

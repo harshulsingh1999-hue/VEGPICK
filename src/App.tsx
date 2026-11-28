@@ -24,6 +24,7 @@ const OrderDetails = lazy(() => import('./pages/OrderDetails').then(module => ({
 const Profile = lazy(() => import('./pages/Profile').then(module => ({ default: module.Profile })));
 const Coupons = lazy(() => import('./pages/Coupons').then(module => ({ default: module.Coupons })));
 const ProductDetails = lazy(() => import('./pages/ProductDetails').then(module => ({ default: module.ProductDetails })));
+const NotFound = lazy(() => import('./pages/NotFound').then(module => ({ default: module.NotFound })));
 
 // Lazy load static pages
 const Disclaimer = lazy(() => import('./pages/static/Disclaimer').then(module => ({ default: module.Disclaimer })));
@@ -129,6 +130,7 @@ export default function App() {
                           </RoleGuard>
                         }
                       />
+                      <Route path="*" element={<NotFound />} />
                     </Routes>
                   </Suspense>
                   </div>

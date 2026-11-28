@@ -600,9 +600,9 @@ service cloud.firestore {
           (
             isApprovedPartner() &&
             existing().assignedToUid == '' &&
-            existing().status in ['placed', 'packed'] &&
+            existing().status in ['placed', 'packed', 'out_for_delivery'] &&
             incoming().assignedToUid == request.auth.uid &&
-            incoming().status in ['placed', 'packed'] &&
+            incoming().status in ['placed', 'packed', 'out_for_delivery'] &&
             incoming().diff(existing()).affectedKeys().hasOnly(['assignedToUid', 'assignedToName', 'assignedToCode', 'status', 'updatedAt'])
           ) ||
           // Assigned Approved Partner updates active trip, proof photo, or COD payment (Terminal State Locked)
@@ -618,7 +618,13 @@ service cloud.firestore {
 
     // 9. PII-Free Dispatch Feed (Available Order Queue)
     match /dispatchFeed/{orderId} {
-      allow get: if isValidId(orderId) && (isApprovedPartner() || isAdmin());
+      allow get: if isValidId(orderId) && (
+        isApprovedPartner() ||
+        isAdmin() ||
+        (isSignedIn() &&
+          exists(/databases/$(database)/documents/orders/$(orderId)) &&
+          get(/databases/$(database)/documents/orders/$(orderId)).data.userId == request.auth.uid)
+      );
       allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.assignedToUid == '');
       allow create: if isVerifiedUser() && isValidId(orderId) && isValidDispatchFeed(incoming()) &&
         incoming().orderId == orderId &&
@@ -634,9 +640,10 @@ service cloud.firestore {
           isAdmin() ||
           // Sync customer cancellation atomically with order owner check
           (
-            existing().status == 'placed' &&
+            !(existing().status in ['delivered', 'cancelled']) &&
             incoming().status == 'cancelled' &&
             get(/databases/$(database)/documents/orders/$(orderId)).data.userId == request.auth.uid &&
+            get(/databases/$(database)/documents/orders/$(orderId)).data.status == 'placed' &&
             getAfter(/databases/$(database)/documents/orders/$(orderId)).data.status == 'cancelled' &&
             incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
           ) ||
@@ -650,9 +657,16 @@ service cloud.firestore {
           // Assigned Approved Partner updates status (Terminal State Locked)
           (
             isApprovedPartner() &&
-            existing().assignedToUid == request.auth.uid &&
+            (
+              existing().assignedToUid == request.auth.uid ||
+              (
+                exists(/databases/$(database)/documents/orders/$(orderId)) &&
+                get(/databases/$(database)/documents/orders/$(orderId)).data.assignedToUid == request.auth.uid
+              )
+            ) &&
             !(existing().status in ['delivered', 'cancelled']) &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+            incoming().assignedToUid == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['assignedToUid', 'status', 'updatedAt'])
           )
         );
       allow delete: if isValidId(orderId) && isAdmin();
@@ -708,8 +722,7 @@ service cloud.firestore {
         isAdmin() || (
           isApprovedPartner() && (
             (resource != null && resource.data.partnerUid == request.auth.uid) ||
-            (resource == null &&
-              exists(/databases/$(database)/documents/orders/$(orderId)) &&
+            (exists(/databases/$(database)/documents/orders/$(orderId)) &&
               get(/databases/$(database)/documents/orders/$(orderId)).data.assignedToUid == request.auth.uid)
           )
         )

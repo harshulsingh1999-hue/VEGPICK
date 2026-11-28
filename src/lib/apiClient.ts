@@ -221,20 +221,27 @@ export async function apiFetch(
     const target = targets[i];
     const isLastAttempt = i === targets.length - 1;
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    const onCallerAbort = () => controller.abort();
+    if (init.signal) {
+      if (init.signal.aborted) {
+        controller.abort();
+      } else {
+        init.signal.addEventListener('abort', onCallerAbort, { once: true });
+      }
+    }
+    const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const response = await fetch(`${target.url}${normalizedPath}`, {
         ...init,
-        signal: init.signal || controller.signal
+        signal: controller.signal
       });
-      window.clearTimeout(timer);
 
       if ((response.status >= 500 || response.status === 429) && !isLastAttempt) {
         circuitCooldownUntil.set(target.id, Date.now() + CIRCUIT_BREAKER_COOLDOWN_MS);
         lastResponse = response;
         if (target.id === 'backup-retry' || targets[i + 1]?.url === target.url) {
-          await new Promise((r) => window.setTimeout(r, 180));
+          await new Promise((r) => globalThis.setTimeout(r, 180));
         }
         continue;
       }
@@ -243,12 +250,14 @@ export async function apiFetch(
       lastServedNodeId = target.id;
       return response;
     } catch (err) {
-      window.clearTimeout(timer);
       circuitCooldownUntil.set(target.id, Date.now() + CIRCUIT_BREAKER_COOLDOWN_MS);
       lastError = err;
       if (!isLastAttempt && (target.id === 'backup-retry' || targets[i + 1]?.url === target.url)) {
-        await new Promise((r) => window.setTimeout(r, 180));
+        await new Promise((r) => globalThis.setTimeout(r, 180));
       }
+    } finally {
+      globalThis.clearTimeout(timer);
+      init.signal?.removeEventListener('abort', onCallerAbort);
     }
   }
 

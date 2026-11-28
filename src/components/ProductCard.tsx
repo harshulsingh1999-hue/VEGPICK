@@ -1,6 +1,6 @@
 import React from 'react';
 import { useStore } from '../context/StoreContext';
-import { Plus, Minus, Star } from 'lucide-react';
+import { Plus, Star } from 'lucide-react';
 import { formatCurrency, getProductFrontImage, getProductImages } from '../lib/utils';
 import { Product } from '../lib/data';
 

@@ -675,9 +675,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       throw new Error('Authentication required to place order.');
     }
 
+    if (!Array.isArray(input.items) || input.items.length === 0) {
+      throw new Error('Your cart is empty.');
+    }
+
     const orderId = 'ORD-' + Math.floor(100000 + Math.random() * 900000);
     const deliveryPin = String(Math.floor(1000 + Math.random() * 9000));
     const cleanPhone = input.customerPhone.replace(/\D/g, '').slice(0, 15);
+    if (cleanPhone.length < 10) {
+      throw new Error('A valid 10-digit mobile number is required to place an order.');
+    }
     const nowIso = new Date().toISOString();
 
     const sanitizedAddress: Address = {
@@ -801,10 +808,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     status: Order['status'],
     paymentStatus?: Order['paymentStatus']
   ): Promise<void> => {
+    if (!firebaseUser) {
+      throw new Error('Authentication required to update order status.');
+    }
+
+    if (!isAdmin) {
+      let currentOrder = orders.find((o) => o.id === orderId);
+      if (!currentOrder) {
+        const orderSnap = await getDoc(doc(db, 'orders', orderId)).catch(() => null);
+        if (orderSnap?.exists()) {
+          currentOrder = { ...(orderSnap.data() as Order), id: orderSnap.id };
+        }
+      }
+      if (!currentOrder) {
+        throw new Error(`Order #${orderId} could not be found.`);
+      }
+      if (currentOrder.userId !== firebaseUser.uid) {
+        throw new Error('You can only cancel your own orders.');
+      }
+      if (status !== 'cancelled' || currentOrder.status !== 'placed') {
+        throw new Error('Order has already been packed or dispatched and can no longer be cancelled.');
+      }
+    }
+
     try {
-      const feedSnap = isAdmin
-        ? await getDoc(doc(db, 'dispatchFeed', orderId)).catch(() => null)
-        : null;
+      const feedSnap = await getDoc(doc(db, 'dispatchFeed', orderId)).catch(() => null);
       const batch = writeBatch(db);
       const orderUpdate: Record<string, unknown> = {
         status,
@@ -815,7 +843,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       batch.update(doc(db, 'orders', orderId), orderUpdate);
-      if (!isAdmin || feedSnap?.exists()) {
+      const feedData = feedSnap?.exists() ? (feedSnap.data() as Partial<DispatchFeedItem>) : null;
+      const canUpdateFeed =
+        Boolean(feedSnap?.exists()) &&
+        (isAdmin || (feedData?.status !== 'delivered' && feedData?.status !== 'cancelled'));
+      if (canUpdateFeed) {
         batch.update(doc(db, 'dispatchFeed', orderId), {
           status,
           updatedAt: serverTimestamp()

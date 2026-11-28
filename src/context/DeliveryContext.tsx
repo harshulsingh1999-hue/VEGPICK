@@ -321,24 +321,43 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   };
 
   const acceptOrder = async (orderId: string): Promise<void> => {
-    if (!firebaseUser || !deliveryUser || !deliveryUser.isApproved) return;
-    const feedItem = availableOrders.find((f) => f.orderId === orderId);
-    const nextStatus = feedItem?.status === 'placed' ? 'packed' : (feedItem?.status || 'packed');
+    if (!firebaseUser || !deliveryUser || !deliveryUser.isApproved) {
+      throw new Error('Approved delivery partner session required to accept orders.');
+    }
+
+    const feedSnap = await getDoc(doc(db, 'dispatchFeed', orderId)).catch(() => null);
+    const feedItem =
+      (feedSnap?.exists() ? (feedSnap.data() as DispatchFeedItem) : null) ||
+      availableOrders.find((f) => f.orderId === orderId);
+
+    if (feedItem?.assignedToUid && feedItem.assignedToUid !== firebaseUser.uid) {
+      throw new Error('This order was already claimed by another delivery partner.');
+    }
+    if (feedItem?.status === 'delivered' || feedItem?.status === 'cancelled') {
+      throw new Error(`Order #${orderId} is already ${feedItem.status}.`);
+    }
+
+    const nextStatus: Order['status'] =
+      feedItem?.status === 'out_for_delivery' ? 'out_for_delivery' : 'packed';
 
     try {
       const batch = writeBatch(db);
+      const safePartnerName = (deliveryUser.name || '').trim().slice(0, 120) || 'Delivery Partner';
+      const safePartnerCode = (deliveryUser.partnerCode || '').trim().slice(0, 32) || 'DEL';
       batch.update(doc(db, 'orders', orderId), {
         assignedToUid: firebaseUser.uid,
-        assignedToName: deliveryUser.name.slice(0, 120),
-        assignedToCode: deliveryUser.partnerCode.slice(0, 32),
+        assignedToName: safePartnerName,
+        assignedToCode: safePartnerCode,
         status: nextStatus,
         updatedAt: serverTimestamp()
       });
-      batch.update(doc(db, 'dispatchFeed', orderId), {
-        assignedToUid: firebaseUser.uid,
-        status: nextStatus,
-        updatedAt: serverTimestamp()
-      });
+      if (feedSnap?.exists()) {
+        batch.update(doc(db, 'dispatchFeed', orderId), {
+          assignedToUid: firebaseUser.uid,
+          status: nextStatus,
+          updatedAt: serverTimestamp()
+        });
+      }
       await batch.commit();
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `orders/${orderId}`);
@@ -372,7 +391,7 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             orderId: order.id,
             customerUid: order.userId,
             partnerUid: firebaseUser.uid,
-            partnerName: deliveryUser.name.slice(0, 120),
+            partnerName: (deliveryUser.name || '').trim().slice(0, 120) || 'Delivery Partner',
             status: activeStatus,
             lat,
             lng,
@@ -405,9 +424,43 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     failureReason?: string,
     proofImageUrl?: string
   ): Promise<void> => {
-    if (!firebaseUser || !deliveryUser) return;
-    const targetOrder = assignedOrders.find((o) => o.id === orderId);
-    const shouldMarkCodCollected = status === 'delivered' && targetOrder?.paymentMethod === 'cod';
+    if (!firebaseUser || !deliveryUser || !deliveryUser.isApproved) {
+      throw new Error('Approved delivery partner session required.');
+    }
+
+    let targetOrder = assignedOrders.find((o) => o.id === orderId);
+    if (!targetOrder) {
+      const orderSnap = await getDoc(doc(db, 'orders', orderId)).catch(() => null);
+      if (orderSnap?.exists()) {
+        targetOrder = { ...(orderSnap.data() as Order), id: orderSnap.id };
+      }
+    }
+    if (!targetOrder) {
+      throw new Error(`Order #${orderId} could not be found.`);
+    }
+    if (targetOrder.assignedToUid !== firebaseUser.uid) {
+      throw new Error(`Order #${orderId} is no longer assigned to your account.`);
+    }
+    if (targetOrder.status === 'delivered' || targetOrder.status === 'cancelled') {
+      throw new Error(`Order #${orderId} is already ${targetOrder.status}.`);
+    }
+
+    const shouldMarkCodCollected =
+      status === 'delivered' &&
+      targetOrder.paymentMethod === 'cod' &&
+      targetOrder.paymentStatus !== 'collected';
+    const [feedSnap, activeSnap] = await Promise.all([
+      getDoc(doc(db, 'dispatchFeed', orderId)).catch(() => null),
+      status === 'delivered' || status === 'cancelled'
+        ? getDoc(doc(db, 'active_deliveries', orderId)).catch(() => null)
+        : Promise.resolve(null)
+    ]);
+    const feedData = feedSnap?.exists() ? (feedSnap.data() as Partial<DispatchFeedItem>) : null;
+    const canUpdateFeed =
+      Boolean(feedSnap?.exists()) &&
+      feedData?.status !== 'delivered' &&
+      feedData?.status !== 'cancelled';
+    const safePartnerName = (deliveryUser.name || '').trim().slice(0, 120) || 'Delivery Partner';
 
     try {
       const batch = writeBatch(db);
@@ -426,12 +479,15 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
 
       batch.update(doc(db, 'orders', orderId), orderUpdate);
-      batch.update(doc(db, 'dispatchFeed', orderId), {
-        status,
-        updatedAt: serverTimestamp()
-      });
+      if (canUpdateFeed) {
+        batch.update(doc(db, 'dispatchFeed', orderId), {
+          assignedToUid: firebaseUser.uid,
+          status,
+          updatedAt: serverTimestamp()
+        });
+      }
 
-      if (status === 'delivered' && targetOrder?.status !== 'delivered') {
+      if (status === 'delivered') {
         batch.update(doc(db, 'deliveryPartners', firebaseUser.uid), {
           completedDeliveries: increment(1),
           updatedAt: serverTimestamp()
@@ -440,7 +496,7 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         batch.set(doc(db, 'walletLedger', ledgerId), {
           id: ledgerId,
           partnerUid: firebaseUser.uid,
-          partnerName: deliveryUser.name.slice(0, 120),
+          partnerName: safePartnerName,
           orderId,
           type: 'trip_credit',
           amount: 45,
@@ -450,19 +506,17 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
 
       // Cost-saving cleanup: remove ephemeral GPS tracking doc once terminal state reached
-      if (status === 'delivered' || status === 'cancelled') {
+      if ((status === 'delivered' || status === 'cancelled') && (activeSnap === null || activeSnap.exists())) {
         batch.delete(doc(db, 'active_deliveries', orderId));
       }
 
       await batch.commit();
-      if (targetOrder) {
-        archiveOrderAsync({
-          ...targetOrder,
-          status,
-          paymentStatus: shouldMarkCodCollected ? 'collected' : targetOrder.paymentStatus
-        });
-      }
-      if (status === 'delivered' && targetOrder?.status !== 'delivered') {
+      archiveOrderAsync({
+        ...targetOrder,
+        status,
+        paymentStatus: shouldMarkCodCollected ? 'collected' : targetOrder.paymentStatus
+      });
+      if (status === 'delivered') {
         archiveLedgerAsync({
           id: `trip_${orderId}`,
           partnerUid: firebaseUser.uid,
@@ -477,12 +531,34 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   };
 
   const collectDeliveryPayment = async (orderId: string): Promise<void> => {
+    if (!firebaseUser || !deliveryUser || !deliveryUser.isApproved) {
+      throw new Error('Approved delivery partner session required.');
+    }
+
+    let targetOrder = assignedOrders.find((o) => o.id === orderId);
+    if (!targetOrder) {
+      const orderSnap = await getDoc(doc(db, 'orders', orderId)).catch(() => null);
+      if (orderSnap?.exists()) {
+        targetOrder = { ...(orderSnap.data() as Order), id: orderSnap.id };
+      }
+    }
+    if (targetOrder) {
+      if (targetOrder.assignedToUid !== firebaseUser.uid) {
+        throw new Error(`Order #${orderId} is no longer assigned to your account.`);
+      }
+      if (targetOrder.status === 'delivered' || targetOrder.status === 'cancelled') {
+        throw new Error(`Cannot mark COD collected after order is ${targetOrder.status}.`);
+      }
+      if (targetOrder.paymentStatus === 'collected') {
+        return;
+      }
+    }
+
     try {
       await updateDoc(doc(db, 'orders', orderId), {
         paymentStatus: 'collected',
         updatedAt: serverTimestamp()
       });
-      const targetOrder = assignedOrders.find((o) => o.id === orderId);
       if (targetOrder) {
         archiveOrderAsync({ ...targetOrder, paymentStatus: 'collected' });
       }
@@ -608,7 +684,7 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       batch.set(doc(db, 'walletLedger', ledgerId), {
         id: ledgerId,
         partnerUid: firebaseUser.uid,
-        partnerName: deliveryUser.name.slice(0, 120),
+        partnerName: (deliveryUser.name || '').trim().slice(0, 120) || 'Delivery Partner',
         orderId: '',
         type: 'cod_settlement',
         amount: settledAmount,
