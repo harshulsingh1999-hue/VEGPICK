@@ -1,5 +1,10 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
-import { reportClientDiagnostic, runClientDeviceCleanup } from '../lib/appDiagnosticsClient';
+import {
+  canTriggerChunkAutoReload,
+  isRecoverableChunkOrHookError,
+  reportClientDiagnostic,
+  runClientDeviceCleanup
+} from '../lib/appDiagnosticsClient';
 
 interface Props {
   children: ReactNode;
@@ -37,13 +42,8 @@ export class ErrorBoundary extends Component<Props, State> {
       category: 'react_boundary',
       message: msg || 'React render exception caught by ErrorBoundary'
     });
-    // Automatically recover once from stale dynamic chunk errors after deployment
-    if (
-      (msg.includes('Failed to fetch dynamically imported module') ||
-        msg.includes('Importing a module script failed')) &&
-      !sessionStorage.getItem('freshveggie_chunk_reloaded')
-    ) {
-      sessionStorage.setItem('freshveggie_chunk_reloaded', '1');
+    // Automatically recover cleanly from stale dynamic chunk or React hook mismatch errors
+    if (isRecoverableChunkOrHookError(msg) && canTriggerChunkAutoReload()) {
       void runClientDeviceCleanup({ preserveAuth: true, resetClusterCache: false }).finally(() => {
         window.location.reload();
       });

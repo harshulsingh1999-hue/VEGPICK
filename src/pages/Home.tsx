@@ -15,6 +15,7 @@ import { useStore } from '../context/StoreContext';
 import { ProductCard } from '../components/ProductCard';
 import { Sidebar } from '../components/Sidebar';
 import { AppLogo } from '../components/AppLogo';
+import { PushPermissionBanner } from '../components/PushPermissionBanner';
 import { useToast } from '../context/ToastContext';
 
 const BANNER_PALETTES = [
@@ -232,6 +233,10 @@ export const Home = () => {
             <span className="text-gray-500 text-sm">Search for vegetables...</span>
           </Link>
         </div>
+      </div>
+
+      <div className="px-4 mt-4">
+        <PushPermissionBanner role="customer" theme="light" compact />
       </div>
 
       {/* Local Area & Pincode Checker */}

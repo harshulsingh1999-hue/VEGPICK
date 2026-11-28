@@ -94,6 +94,34 @@ export async function reportClientDiagnostic(input: {
 
 let guardInstalled = false;
 
+export function isRecoverableChunkOrHookError(message: string): boolean {
+  if (!message) return false;
+  return (
+    message.includes('Failed to fetch dynamically imported module') ||
+    message.includes('Importing a module script failed') ||
+    message.includes('Loading chunk') ||
+    message.includes("reading 'useContext'") ||
+    message.includes("reading 'useState'") ||
+    message.includes("reading 'useEffect'") ||
+    message.includes("reading 'useRef'")
+  );
+}
+
+export function canTriggerChunkAutoReload(): boolean {
+  if (typeof sessionStorage === 'undefined') return false;
+  try {
+    const rawTs = sessionStorage.getItem('freshveggie_chunk_reloaded_ts');
+    const prevTs = rawTs ? Number(rawTs) : 0;
+    if (prevTs && Date.now() - prevTs < 30_000) {
+      return false;
+    }
+    sessionStorage.setItem('freshveggie_chunk_reloaded_ts', String(Date.now()));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function installGlobalErrorGuard(): void {
   if (typeof window === 'undefined' || guardInstalled) return;
   guardInstalled = true;
@@ -103,6 +131,17 @@ export function installGlobalErrorGuard(): void {
     if (!msg) return;
     // Ignore benign ResizeObserver browser noise
     if (msg.includes('ResizeObserver loop')) return;
+    if (isRecoverableChunkOrHookError(msg) && canTriggerChunkAutoReload()) {
+      void reportClientDiagnostic({
+        severity: 'warning',
+        category: 'chunk_auto_heal',
+        message: `Auto-reloaded after stale module/hook error: ${msg}`
+      });
+      void runClientDeviceCleanup({ preserveAuth: true, resetClusterCache: false }).finally(() => {
+        window.location.reload();
+      });
+      return;
+    }
     void reportClientDiagnostic({
       severity: 'error',
       category: 'window_error',
@@ -121,12 +160,7 @@ export function installGlobalErrorGuard(): void {
     if (!msg) return;
 
     // Auto-recover from stale dynamic chunk errors on Android/iOS/Web PWAs
-    if (
-      (msg.includes('Failed to fetch dynamically imported module') ||
-        msg.includes('Importing a module script failed')) &&
-      !sessionStorage.getItem('freshveggie_chunk_reloaded')
-    ) {
-      sessionStorage.setItem('freshveggie_chunk_reloaded', '1');
+    if (isRecoverableChunkOrHookError(msg) && canTriggerChunkAutoReload()) {
       void reportClientDiagnostic({
         severity: 'warning',
         category: 'chunk_auto_heal',

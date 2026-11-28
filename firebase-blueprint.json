@@ -868,6 +868,80 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "DeliverySlot": {
+      "title": "DeliverySlot",
+      "description": "Admin-managed delivery schedule slot by specific date or daily recurring window.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+$",
+          "maxLength": 128
+        },
+        "scheduleType": {
+          "type": "string",
+          "enum": ["date", "daily"]
+        },
+        "slotDate": {
+          "type": "string",
+          "pattern": "^$|^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "maxLength": 10
+        },
+        "startTime": {
+          "type": "string",
+          "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+          "maxLength": 5
+        },
+        "endTime": {
+          "type": "string",
+          "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+          "maxLength": 5
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "isActive": {
+          "type": "boolean"
+        },
+        "maxOrders": {
+          "type": "number"
+        },
+        "cutoffMinutes": {
+          "type": "number"
+        },
+        "sortOrder": {
+          "type": "number"
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "scheduleType",
+        "slotDate",
+        "startTime",
+        "endTime",
+        "label",
+        "isActive",
+        "maxOrders",
+        "cutoffMinutes",
+        "sortOrder",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -922,6 +996,10 @@
     "/serviceAreas/{areaId}": {
       "schema": { "$ref": "#/entities/ServiceArea" },
       "description": "Approved serviceable local areas and pincodes managed by Super Admin."
+    },
+    "/deliverySlots/{slotId}": {
+      "schema": { "$ref": "#/entities/DeliverySlot" },
+      "description": "Delivery slot dates and time windows configured by Admin."
     }
   }
 }

@@ -6,6 +6,7 @@ import { formatCurrency, getProductFrontImage } from '../lib/utils';
 import { Package, ChevronRight, ChevronDown, Clock, MapPin, CheckCircle, Circle, RefreshCw, XCircle, Truck, ArrowRight, KeyRound } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { PhoneOtpAuthCard } from '../components/PhoneOtpAuthCard';
+import { PushPermissionBanner } from '../components/PushPermissionBanner';
 
 const STEPS = [
   { id: 'placed', label: 'Order Placed' },
@@ -158,6 +159,10 @@ export const Orders = () => {
         <Link to="/browse" className="text-xs font-bold text-green-600 hover:underline flex items-center gap-1">
           Shop More <ArrowRight size={14} />
         </Link>
+      </div>
+
+      <div className="mb-4">
+        <PushPermissionBanner role="customer" theme="light" />
       </div>
 
       {/* Tabs */}

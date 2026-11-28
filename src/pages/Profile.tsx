@@ -4,6 +4,7 @@ import { User, MapPin, LogOut, Edit2, Tag, ChevronRight, Package } from 'lucide-
 import { Link, useNavigate } from 'react-router-dom';
 import { useToast } from '../context/ToastContext';
 import { PhoneOtpAuthCard } from '../components/PhoneOtpAuthCard';
+import { PushPermissionBanner } from '../components/PushPermissionBanner';
 
 export const Profile = () => {
   const { user, firebaseUser, authReady, ensureCustomerProfile, orders, logout, updateProfile, addAddress } = useAuth();
@@ -112,7 +113,11 @@ export const Profile = () => {
 
   return (
     <div className="pb-24 pt-4 px-4 max-w-2xl mx-auto">
-      <h1 className="text-2xl font-bold mb-6">My Profile</h1>
+      <h1 className="text-2xl font-bold mb-4">My Profile</h1>
+
+      <div className="mb-5">
+        <PushPermissionBanner role="customer" theme="light" />
+      </div>
 
       <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 mb-6">
         <div className="flex items-center gap-4 mb-6">

@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useDelivery } from '../../context/DeliveryContext';
 import { useToast } from '../../context/ToastContext';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import {
   Power,
   MapPin,
@@ -13,10 +13,24 @@ import {
   X,
   Check,
   PackagePlus,
-  Clock
+  Clock,
+  Navigation,
+  Settings2
 } from 'lucide-react';
 import { formatCurrency, formatPaymentMethodLabel } from '../../lib/utils';
 import { DeliveryNavbar } from '../../components/DeliveryNavbar';
+import { PushPermissionBanner } from '../../components/PushPermissionBanner';
+import { LocationPermissionModal } from '../../components/delivery/LocationPermissionModal';
+import {
+  GeoPermissionState,
+  openDeviceLocationSettingsDirectly,
+  subscribeGeolocationPermissionChange
+} from '../../lib/locationPermission';
+import {
+  enableAndSubscribePush,
+  getNotificationPermissionState,
+  sendLocationPermissionPushReminder
+} from '../../lib/pushNotifications';
 
 export const DeliveryDashboard = () => {
   const { authReady } = useAuth();
@@ -33,12 +47,17 @@ export const DeliveryDashboard = () => {
   const { showToast } = useToast();
   const navigate = useNavigate();
 
+  const [searchParams, setSearchParams] = useSearchParams();
   const [activeTab, setActiveTab] = useState<'pending' | 'completed' | 'available'>(
     'pending'
   );
   const [showNewOrder, setShowNewOrder] = useState(false);
   const [dismissedOrderIds, setDismissedOrderIds] = useState<string[]>([]);
   const [busyOrderId, setBusyOrderId] = useState<string | null>(null);
+  const [geoPermission, setGeoPermission] = useState<GeoPermissionState>('prompt');
+  const [syncingGps, setSyncingGps] = useState(false);
+  const [showLocationModal, setShowLocationModal] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
 
   useEffect(() => {
     if (authReady && !partnerLoading && (!deliveryUser || !deliveryUser.isApproved)) {
@@ -61,6 +80,89 @@ export const DeliveryDashboard = () => {
     return undefined;
   }, [deliveryUser?.isApproved, deliveryUser?.isOnline, nextAvailableOrder?.orderId]);
 
+  useEffect(() => {
+    return subscribeGeolocationPermissionChange(setGeoPermission);
+  }, []);
+
+  const openDirectLocationSettings = useCallback(() => {
+    setSyncingGps(false);
+    openDeviceLocationSettingsDirectly('location_source');
+    setShowLocationModal(true);
+  }, []);
+
+  const handleDashboardGpsSync = useCallback(() => {
+    if (!('geolocation' in navigator) || geoPermission === 'unsupported') {
+      setGeoPermission('unsupported');
+      openDirectLocationSettings();
+      void sendLocationPermissionPushReminder({ url: '/delivery/dashboard' });
+      return;
+    }
+
+    if (geoPermission === 'denied') {
+      openDirectLocationSettings();
+      void (async () => {
+        if (getNotificationPermissionState() === 'default') {
+          await enableAndSubscribePush({ role: 'delivery', sendTest: false });
+        }
+        if (getNotificationPermissionState() === 'granted') {
+          await sendLocationPermissionPushReminder({ url: '/delivery/dashboard' });
+        }
+      })();
+      return;
+    }
+
+    setSyncingGps(true);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setSyncingGps(false);
+        setGeoPermission('granted');
+        setShowLocationModal(false);
+        const nowText = new Date().toLocaleTimeString();
+        setLastSyncedAt(`${nowText} (${position.coords.latitude.toFixed(4)}, ${position.coords.longitude.toFixed(4)})`);
+        showToast('Device GPS location synced!', 'success');
+      },
+      (geoErr) => {
+        setSyncingGps(false);
+        if (geoErr.code === geoErr.PERMISSION_DENIED || geoErr.code === geoErr.POSITION_UNAVAILABLE) {
+          if (geoErr.code === geoErr.PERMISSION_DENIED) {
+            setGeoPermission('denied');
+          }
+          openDirectLocationSettings();
+          void (async () => {
+            if (getNotificationPermissionState() === 'default') {
+              await enableAndSubscribePush({ role: 'delivery', sendTest: false });
+            }
+            if (getNotificationPermissionState() === 'granted') {
+              await sendLocationPermissionPushReminder({ url: '/delivery/dashboard' });
+            }
+          })();
+        } else {
+          openDirectLocationSettings();
+        }
+      },
+      { enableHighAccuracy: false, maximumAge: 30000, timeout: 6000 }
+    );
+  }, [geoPermission, openDirectLocationSettings, showToast]);
+
+  useEffect(() => {
+    const onRequestSync = () => {
+      handleDashboardGpsSync();
+    };
+    window.addEventListener('fv-request-location-sync', onRequestSync);
+    return () => {
+      window.removeEventListener('fv-request-location-sync', onRequestSync);
+    };
+  }, [handleDashboardGpsSync]);
+
+  useEffect(() => {
+    if (searchParams.get('syncLocation') === '1') {
+      const next = new URLSearchParams(searchParams);
+      next.delete('syncLocation');
+      setSearchParams(next, { replace: true });
+      handleDashboardGpsSync();
+    }
+  }, [searchParams, setSearchParams, handleDashboardGpsSync]);
+
   const handleLogout = async () => {
     await logoutPartner();
     navigate('/');
@@ -70,6 +172,15 @@ export const DeliveryDashboard = () => {
     if (!deliveryUser) return;
     const willBeOnline = !deliveryUser.isOnline;
     await toggleOnline();
+    if (willBeOnline) {
+      if (getNotificationPermissionState() === 'default') {
+        void enableAndSubscribePush({ role: 'delivery', sendTest: false });
+      }
+      if (geoPermission === 'denied') {
+        openDirectLocationSettings();
+        void sendLocationPermissionPushReminder({ url: '/delivery/dashboard' });
+      }
+    }
     showToast(
       willBeOnline
         ? 'You are now Online & ready for deliveries'
@@ -280,6 +391,58 @@ export const DeliveryDashboard = () => {
           </button>
         </div>
 
+        {/* Device Location & Sync Now Bar */}
+        <div className="mt-3 bg-gray-900 p-3.5 rounded-xl border border-gray-700 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div
+              className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+                geoPermission === 'granted'
+                  ? 'bg-emerald-500/20 text-emerald-400'
+                  : geoPermission === 'denied' || geoPermission === 'unsupported'
+                  ? 'bg-red-500/20 text-red-400'
+                  : 'bg-blue-500/20 text-blue-400'
+              }`}
+            >
+              <Navigation size={15} />
+            </div>
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-white">
+                {geoPermission === 'granted'
+                  ? 'Device GPS Location Allowed'
+                  : geoPermission === 'denied' || geoPermission === 'unsupported'
+                  ? 'Allow Location in Device Settings'
+                  : 'Device Location Permission'}
+              </p>
+              <p className="text-[11px] text-gray-400 truncate">
+                {lastSyncedAt
+                  ? `Synced at ${lastSyncedAt}`
+                  : geoPermission === 'denied'
+                  ? 'Tap Sync Now to open device location settings directly'
+                  : 'Tap Sync Now to allow location permission directly'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={openDirectLocationSettings}
+              className="p-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-amber-300 border border-gray-700"
+              title="Open Device Location Settings"
+            >
+              <Settings2 size={15} />
+            </button>
+            <button
+              type="button"
+              disabled={syncingGps}
+              onClick={handleDashboardGpsSync}
+              className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition disabled:opacity-60"
+            >
+              {syncingGps ? 'Syncing...' : 'Sync Now'}
+            </button>
+          </div>
+        </div>
+
         {/* Stats */}
         <div className="grid grid-cols-3 gap-3 mt-5">
           <div className="bg-gray-900 p-3 rounded-xl text-center border border-gray-700">
@@ -303,6 +466,10 @@ export const DeliveryDashboard = () => {
             </p>
           </div>
         </div>
+      </div>
+
+      <div className="px-4 pt-4">
+        <PushPermissionBanner role="delivery" theme="dark" />
       </div>
 
       {/* Tabs */}
@@ -522,6 +689,13 @@ export const DeliveryDashboard = () => {
       </div>
 
       <DeliveryNavbar />
+
+      <LocationPermissionModal
+        open={showLocationModal}
+        onClose={() => setShowLocationModal(false)}
+        onRetrySync={handleDashboardGpsSync}
+        targetRoute="/delivery/dashboard"
+      />
     </div>
   );
 };

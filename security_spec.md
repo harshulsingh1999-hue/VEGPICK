@@ -11,6 +11,7 @@
 8. **Query Enforcer (No Blanket Reads / Zero `get()` in `allow list`)**: Every `allow list` rule evaluates `resource.data` or auth token claims directly—zero `get()` or `exists()` lookups inside `allow list`.
 9. **Ephemeral Live GPS Isolation (`/active_deliveries/{orderId}`)**: Only the owning customer, assigned approved partner, or admin may read live GPS coordinates. Only the assigned partner or admin may update coordinates, and the temporary doc is deleted atomically upon delivery/cancellation.
 10. **Immutable Financial Ledger (`/walletLedger/{entryId}`)**: Ledger entries are append-only (`allow update: if false`), and partner credits require an atomic matching order delivery or `settledCash` batch increment.
+11. **Admin-Only Schedule & Manual History Deletion (`/deliverySlots/{slotId}` & `/api/admin/orders/delete-history`)**: Only verified Admins can create, edit, pause, or delete delivery slot schedules, and historical order cleanup is strictly manual with zero automated deletion timers.
 
 ---
 

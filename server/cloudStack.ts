@@ -6,6 +6,7 @@ import Database from 'better-sqlite3';
 import { Redis } from '@upstash/redis';
 import { Ratelimit } from '@upstash/ratelimit';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import * as webPush from 'web-push';
 import { createMaintenanceDiagnostics } from './maintenanceDiagnostics.ts';
 
 export interface FirebaseAppletMeta {
@@ -19,9 +20,16 @@ export interface CatalogBootstrapPayload {
   products: Array<Record<string, unknown>>;
   coupons: Array<Record<string, unknown>>;
   serviceAreas: Array<Record<string, unknown>>;
+  deliverySlots: Array<Record<string, unknown>>;
   settings: Record<string, unknown> | null;
   source: 'memory-l1' | 'upstash-l2' | 'firestore-rest' | 'sqlite-replica';
   generatedAt: string;
+}
+
+export interface DeleteOrderHistoryInput {
+  orderIds: string[];
+  deleteLedgerEntries?: boolean;
+  proofImageUrls?: string[];
 }
 
 export interface ArchiveOrderPayload {
@@ -284,6 +292,52 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
       );
       CREATE INDEX IF NOT EXISTS idx_diag_platform_created ON app_diagnostic_events(platform, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_diag_resolved ON app_diagnostic_events(resolved, created_at DESC);
+      CREATE TABLE IF NOT EXISTS push_config (
+        id TEXT PRIMARY KEY,
+        public_key TEXT NOT NULL,
+        private_key TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS push_subscriptions (
+        endpoint TEXT PRIMARY KEY,
+        uid TEXT NOT NULL,
+        device_id TEXT NOT NULL DEFAULT '',
+        role TEXT NOT NULL DEFAULT 'customer',
+        platform TEXT NOT NULL DEFAULT 'web',
+        subscription_json TEXT NOT NULL,
+        user_agent TEXT NOT NULL DEFAULT '',
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS push_events (
+        id TEXT PRIMARY KEY,
+        target_uid TEXT NOT NULL DEFAULT '',
+        target_role TEXT NOT NULL DEFAULT '',
+        target_device_id TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        url TEXT NOT NULL DEFAULT '/',
+        tag TEXT NOT NULL DEFAULT 'freshveggie-alert',
+        action TEXT NOT NULL DEFAULT 'open',
+        order_id TEXT NOT NULL DEFAULT '',
+        require_interaction INTEGER NOT NULL DEFAULT 0,
+        actions_json TEXT NOT NULL DEFAULT '[]',
+        created_at INTEGER NOT NULL
+      );
+    `);
+
+    const subCols = db.prepare('PRAGMA table_info(push_subscriptions)').all() as Array<{ name: string }>;
+    if (!subCols.some((c) => c.name === 'device_id')) {
+      db.exec("ALTER TABLE push_subscriptions ADD COLUMN device_id TEXT NOT NULL DEFAULT ''");
+    }
+
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_push_uid ON push_subscriptions(uid);
+      CREATE INDEX IF NOT EXISTS idx_push_role ON push_subscriptions(role);
+      CREATE INDEX IF NOT EXISTS idx_push_device ON push_subscriptions(device_id);
+      CREATE INDEX IF NOT EXISTS idx_push_events_created ON push_events(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_push_events_device ON push_events(target_device_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_push_events_uid ON push_events(target_uid, created_at DESC);
     `);
   };
 
@@ -1316,6 +1370,711 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     }
   };
 
+  const verifyFirebaseUserToken = async (
+    idToken: string
+  ): Promise<{
+    authenticated: boolean;
+    uid?: string;
+    email?: string;
+    phoneNumber?: string;
+    isAdmin?: boolean;
+    reason?: string;
+  }> => {
+    if (!idToken || !firebaseMeta.apiKey) {
+      return { authenticated: false, reason: 'Missing authentication token.' };
+    }
+
+    const cacheKey = `user_verify:${sha256Hex(idToken).slice(0, 24)}`;
+    const cached = getL1<{
+      authenticated: boolean;
+      uid?: string;
+      email?: string;
+      phoneNumber?: string;
+      isAdmin?: boolean;
+    }>(cacheKey);
+    if (cached && cached.authenticated) {
+      return cached;
+    }
+
+    try {
+      const authStart = performance.now();
+      const lookupRes = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(firebaseMeta.apiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken }),
+          signal: AbortSignal.timeout(3500)
+        }
+      );
+      recordApiUsage('cloud-firebase-auth', {
+        latencyMs: performance.now() - authStart,
+        statusCode: lookupRes.status
+      });
+      if (!lookupRes.ok) {
+        return { authenticated: false, reason: 'Invalid or expired Firebase session token.' };
+      }
+      const lookupData = (await lookupRes.json()) as {
+        users?: Array<{
+          localId?: string;
+          email?: string;
+          emailVerified?: boolean;
+          phoneNumber?: string;
+        }>;
+      };
+      const account = lookupData.users?.[0];
+      const uid = account?.localId || '';
+      if (!uid) {
+        return { authenticated: false, reason: 'Firebase user account not found.' };
+      }
+      const isAdmin =
+        Boolean(account?.emailVerified) && account?.email === BOOTSTRAPPED_ADMIN_EMAIL;
+      const result = {
+        authenticated: true,
+        uid,
+        email: account?.email || '',
+        phoneNumber: account?.phoneNumber || '',
+        isAdmin
+      };
+      setL1(cacheKey, result, 60_000);
+      return result;
+    } catch {
+      return { authenticated: false, reason: 'Unable to verify Firebase session token.' };
+    }
+  };
+
+  // Cross-Platform Web Push Engine (Android Chrome/PWA + iOS 16.4+ Safari PWA + Web)
+  let cachedVapid: { publicKey: string; privateKey: string; subject: string } | null = null;
+  const getOrCreateVapidKeys = () => {
+    const envPub = (process.env.VAPID_PUBLIC_KEY || '').trim();
+    const envPriv = (process.env.VAPID_PRIVATE_KEY || '').trim();
+    const envSub =
+      (process.env.VAPID_SUBJECT || '').trim() || 'mailto:support@freshveggie.local';
+
+    if (envPub && envPriv) {
+      webPush.setVapidDetails(envSub, envPub, envPriv);
+      return { publicKey: envPub, privateKey: envPriv, subject: envSub };
+    }
+
+    if (cachedVapid) {
+      return cachedVapid;
+    }
+
+    try {
+      const existing = sqlite
+        .prepare("SELECT public_key, private_key, subject FROM push_config WHERE id = 'default'")
+        .get() as { public_key: string; private_key: string; subject: string } | undefined;
+      if (existing?.public_key && existing?.private_key) {
+        cachedVapid = {
+          publicKey: existing.public_key,
+          privateKey: existing.private_key,
+          subject: existing.subject || envSub
+        };
+        webPush.setVapidDetails(cachedVapid.subject, cachedVapid.publicKey, cachedVapid.privateKey);
+        return cachedVapid;
+      }
+    } catch {
+      // generate fresh VAPID keys below
+    }
+
+    const generated = webPush.generateVAPIDKeys();
+    cachedVapid = {
+      publicKey: generated.publicKey,
+      privateKey: generated.privateKey,
+      subject: envSub
+    };
+    try {
+      sqlite
+        .prepare(
+          'INSERT OR REPLACE INTO push_config (id, public_key, private_key, subject, created_at) VALUES (?, ?, ?, ?, ?)'
+        )
+        .run(
+          'default',
+          cachedVapid.publicKey,
+          cachedVapid.privateKey,
+          cachedVapid.subject,
+          new Date().toISOString()
+        );
+    } catch {
+      // memory cache still holds keys
+    }
+    webPush.setVapidDetails(cachedVapid.subject, cachedVapid.publicKey, cachedVapid.privateKey);
+    return cachedVapid;
+  };
+
+  let cachedDeviceHmacSecret: string | null = null;
+  const getPushDeviceSecret = (): string => {
+    const envSecret = (process.env.PUSH_DEVICE_SECRET || '').trim();
+    if (envSecret.length >= 16) {
+      return envSecret;
+    }
+    if (cachedDeviceHmacSecret) {
+      return cachedDeviceHmacSecret;
+    }
+    try {
+      const existing = sqlite
+        .prepare("SELECT private_key FROM push_config WHERE id = 'device_hmac'")
+        .get() as { private_key: string } | undefined;
+      if (existing?.private_key && existing.private_key.length >= 32) {
+        cachedDeviceHmacSecret = existing.private_key;
+        return cachedDeviceHmacSecret;
+      }
+    } catch {
+      // fall through to generate secret
+    }
+    const generatedSecret = crypto.randomBytes(32).toString('hex');
+    cachedDeviceHmacSecret = generatedSecret;
+    try {
+      sqlite
+        .prepare(
+          'INSERT OR REPLACE INTO push_config (id, public_key, private_key, subject, created_at) VALUES (?, ?, ?, ?, ?)'
+        )
+        .run('device_hmac', 'hmac-sha256', generatedSecret, 'device-token', new Date().toISOString());
+    } catch {
+      // keep in memory if disk write unavailable
+    }
+    return cachedDeviceHmacSecret;
+  };
+
+  const isValidDeviceId = (raw: string): boolean => /^[a-zA-Z0-9_-]{12,80}$/.test(raw);
+
+  const normalizeDeviceId = (raw?: string): string => {
+    const cleaned = typeof raw === 'string' ? raw.trim() : '';
+    if (isValidDeviceId(cleaned)) return cleaned;
+    return `dev_${crypto.randomBytes(12).toString('hex')}`;
+  };
+
+  const issueDevicePushToken = (deviceId: string): string => {
+    const cleanId = normalizeDeviceId(deviceId);
+    const sig = crypto
+      .createHmac('sha256', getPushDeviceSecret())
+      .update(cleanId)
+      .digest('hex');
+    return `${cleanId}.${sig}`;
+  };
+
+  const verifyDevicePushToken = (
+    rawToken: string
+  ): { valid: boolean; deviceId?: string } => {
+    if (!rawToken || typeof rawToken !== 'string') {
+      return { valid: false };
+    }
+    const dotIdx = rawToken.indexOf('.');
+    if (dotIdx <= 0) {
+      return { valid: false };
+    }
+    const deviceId = rawToken.slice(0, dotIdx);
+    const providedHex = rawToken.slice(dotIdx + 1);
+    if (!isValidDeviceId(deviceId) || !/^[a-f0-9]{64}$/i.test(providedHex)) {
+      return { valid: false };
+    }
+    const expectedHex = crypto
+      .createHmac('sha256', getPushDeviceSecret())
+      .update(deviceId)
+      .digest('hex');
+    try {
+      const a = Buffer.from(providedHex, 'hex');
+      const b = Buffer.from(expectedHex, 'hex');
+      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+        return { valid: false };
+      }
+      return { valid: true, deviceId };
+    } catch {
+      return { valid: false };
+    }
+  };
+
+  const isValidPushEndpoint = (rawUrl: string): boolean => {
+    if (!rawUrl || rawUrl.length > 1024) return false;
+    try {
+      const parsed = new URL(rawUrl);
+      if (parsed.protocol !== 'https:') return false;
+      const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+      if (
+        !host ||
+        host === 'localhost' ||
+        host === '0.0.0.0' ||
+        host === '127.0.0.1' ||
+        host === '::1' ||
+        host.endsWith('.local') ||
+        host.endsWith('.internal') ||
+        host.startsWith('10.') ||
+        host.startsWith('192.168.') ||
+        host.startsWith('169.254.') ||
+        /^fe80:/i.test(host) ||
+        /^f[cd][0-9a-f]{2}:/i.test(host) ||
+        /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+      ) {
+        return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const sanitizeRelativeAppUrl = (rawUrl?: string): string => {
+    if (typeof rawUrl === 'string' && rawUrl.startsWith('/') && !rawUrl.startsWith('//')) {
+      return rawUrl.slice(0, 200);
+    }
+    return '/';
+  };
+
+  const getVapidPublicKey = (): string => getOrCreateVapidKeys().publicKey;
+
+  const upsertPushSubscription = (input: {
+    uid?: string;
+    deviceId?: string;
+    verifiedDeviceId?: string;
+    role: 'customer' | 'delivery' | 'admin';
+    platform: 'android' | 'ios' | 'web';
+    subscription: { endpoint: string; keys: { p256dh: string; auth: string } };
+    userAgent?: string;
+  }): { ok: boolean; deviceId: string } => {
+    let cleanDeviceId = normalizeDeviceId(input.verifiedDeviceId || input.deviceId);
+    if (
+      !isValidPushEndpoint(input.subscription?.endpoint) ||
+      !input.subscription?.keys?.p256dh ||
+      !input.subscription?.keys?.auth
+    ) {
+      return { ok: false, deviceId: cleanDeviceId };
+    }
+
+    // Prevent unverified callers from claiming an already-registered deviceId belonging to another device
+    if (!input.verifiedDeviceId && input.deviceId && isValidDeviceId(input.deviceId.trim())) {
+      const candidateId = input.deviceId.trim();
+      const occupied = sqlite
+        .prepare('SELECT uid FROM push_subscriptions WHERE device_id = ? LIMIT 1')
+        .get(candidateId) as { uid: string } | undefined;
+      if (occupied && (!input.uid || occupied.uid !== input.uid)) {
+        cleanDeviceId = `dev_${crypto.randomBytes(12).toString('hex')}`;
+      }
+    }
+
+    const existingRow = sqlite
+      .prepare('SELECT uid, role, device_id FROM push_subscriptions WHERE endpoint = ?')
+      .get(input.subscription.endpoint) as
+      | { uid: string; role: string; device_id: string }
+      | undefined;
+
+    let linkedUid = input.uid && !input.uid.startsWith('device:') ? input.uid.slice(0, 128) : '';
+    let resolvedRole: 'customer' | 'delivery' | 'admin' =
+      input.role === 'admin' || input.role === 'delivery' ? input.role : 'customer';
+
+    if (!linkedUid) {
+      // Preserve prior authenticated uid/role when background Service Worker refreshes via verified deviceId
+      if (existingRow?.uid && !existingRow.uid.startsWith('device:')) {
+        if (input.verifiedDeviceId && existingRow.device_id === input.verifiedDeviceId) {
+          linkedUid = existingRow.uid;
+          if (existingRow.role === 'admin') {
+            resolvedRole = 'admin';
+          }
+        }
+      } else if (input.verifiedDeviceId) {
+        const deviceLinkedRow = sqlite
+          .prepare(
+            "SELECT uid, role FROM push_subscriptions WHERE device_id = ? AND uid NOT LIKE 'device:%' ORDER BY updated_at DESC LIMIT 1"
+          )
+          .get(input.verifiedDeviceId) as { uid: string; role: string } | undefined;
+        if (deviceLinkedRow?.uid) {
+          linkedUid = deviceLinkedRow.uid;
+          if (deviceLinkedRow.role === 'admin') {
+            resolvedRole = 'admin';
+          }
+        }
+      }
+    }
+
+    const effectiveUid = linkedUid || `device:${cleanDeviceId}`;
+    const cleanPlatform =
+      input.platform === 'android' || input.platform === 'ios' ? input.platform : 'web';
+
+    sqlite
+      .prepare(
+        `INSERT INTO push_subscriptions (endpoint, uid, device_id, role, platform, subscription_json, user_agent, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(endpoint) DO UPDATE SET
+           uid = CASE
+             WHEN excluded.uid NOT LIKE 'device:%' THEN excluded.uid
+             WHEN push_subscriptions.uid NOT LIKE 'device:%' THEN push_subscriptions.uid
+             ELSE excluded.uid
+           END,
+           device_id = CASE
+             WHEN excluded.device_id != '' THEN excluded.device_id
+             ELSE push_subscriptions.device_id
+           END,
+           role = CASE
+             WHEN push_subscriptions.role = 'admin' AND excluded.uid LIKE 'device:%' THEN 'admin'
+             ELSE excluded.role
+           END,
+           platform = excluded.platform,
+           subscription_json = excluded.subscription_json,
+           user_agent = excluded.user_agent,
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        input.subscription.endpoint,
+        effectiveUid,
+        cleanDeviceId,
+        resolvedRole,
+        cleanPlatform,
+        JSON.stringify({
+          endpoint: input.subscription.endpoint,
+          keys: {
+            p256dh: String(input.subscription.keys.p256dh).slice(0, 512),
+            auth: String(input.subscription.keys.auth).slice(0, 256)
+          }
+        }),
+        String(input.userAgent || '').slice(0, 240),
+        Date.now()
+      );
+    return { ok: true, deviceId: cleanDeviceId };
+  };
+
+  const removePushSubscription = (input: {
+    uid?: string;
+    deviceId?: string;
+    endpoint: string;
+    authKey?: string;
+  }): number => {
+    if (!input.endpoint) return 0;
+    if (input.uid) {
+      const res = sqlite
+        .prepare('DELETE FROM push_subscriptions WHERE uid = ? AND endpoint = ?')
+        .run(input.uid, input.endpoint);
+      if (res.changes > 0) return res.changes;
+    }
+    if (input.deviceId) {
+      const res = sqlite
+        .prepare('DELETE FROM push_subscriptions WHERE device_id = ? AND endpoint = ?')
+        .run(input.deviceId, input.endpoint);
+      if (res.changes > 0) return res.changes;
+    }
+    if (input.authKey) {
+      const row = sqlite
+        .prepare('SELECT subscription_json FROM push_subscriptions WHERE endpoint = ?')
+        .get(input.endpoint) as { subscription_json: string } | undefined;
+      if (row) {
+        try {
+          const parsed = JSON.parse(row.subscription_json) as { keys?: { auth?: string } };
+          if (parsed?.keys?.auth && parsed.keys.auth === input.authKey) {
+            const res = sqlite
+              .prepare('DELETE FROM push_subscriptions WHERE endpoint = ?')
+              .run(input.endpoint);
+            return res.changes || 0;
+          }
+        } catch {
+          return 0;
+        }
+      }
+    }
+    return 0;
+  };
+
+  const getUserPushSubscriptionCount = (uid?: string, deviceId?: string): number => {
+    if (!uid && !deviceId) return 0;
+    if (uid && deviceId) {
+      const row = sqlite
+        .prepare('SELECT COUNT(*) as cnt FROM push_subscriptions WHERE uid = ? OR device_id = ?')
+        .get(uid, deviceId) as { cnt: number } | undefined;
+      return Number(row?.cnt || 0);
+    }
+    if (uid) {
+      const row = sqlite
+        .prepare('SELECT COUNT(*) as cnt FROM push_subscriptions WHERE uid = ?')
+        .get(uid) as { cnt: number } | undefined;
+      return Number(row?.cnt || 0);
+    }
+    const row = sqlite
+      .prepare('SELECT COUNT(*) as cnt FROM push_subscriptions WHERE device_id = ?')
+      .get(deviceId) as { cnt: number } | undefined;
+    return Number(row?.cnt || 0);
+  };
+
+  const getPendingPushEvents = (input: {
+    uid?: string;
+    deviceId?: string;
+    sinceMs?: number;
+  }): Array<{
+    id: string;
+    title: string;
+    body: string;
+    url: string;
+    tag: string;
+    action: string;
+    orderId: string;
+    requireInteraction: boolean;
+    actions?: Array<{ action: string; title: string }>;
+    createdAt: number;
+  }> => {
+    const uid = input.uid ? input.uid.trim().slice(0, 128) : '';
+    const deviceId = input.deviceId && isValidDeviceId(input.deviceId) ? input.deviceId : '';
+    if (!uid && !deviceId) return [];
+
+    const cutoff = Math.max(Date.now() - 12 * 60 * 60 * 1000, Number(input.sinceMs) || 0);
+    let deviceRoles: string[] = [];
+    if (uid || deviceId) {
+      const roleRows = sqlite
+        .prepare(
+          uid && deviceId
+            ? 'SELECT DISTINCT role FROM push_subscriptions WHERE uid = ? OR device_id = ?'
+            : uid
+            ? 'SELECT DISTINCT role FROM push_subscriptions WHERE uid = ?'
+            : 'SELECT DISTINCT role FROM push_subscriptions WHERE device_id = ?'
+        )
+        .all(...(uid && deviceId ? [uid, deviceId] : [uid || deviceId])) as Array<{ role: string }>;
+      deviceRoles = roleRows.map((r) => r.role).filter(Boolean);
+    }
+
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (deviceId) {
+      clauses.push('target_device_id = ?');
+      params.push(deviceId);
+    }
+    if (uid) {
+      clauses.push('target_uid = ?');
+      params.push(uid);
+    }
+    if (deviceRoles.length > 0) {
+      clauses.push(`target_role IN (${deviceRoles.map(() => '?').join(', ')})`);
+      params.push(...deviceRoles);
+    }
+    if (clauses.length === 0) return [];
+
+    const rows = sqlite
+      .prepare(
+        `SELECT id, title, body, url, tag, action, order_id, require_interaction, actions_json, created_at
+         FROM push_events
+         WHERE created_at > ? AND (${clauses.join(' OR ')})
+         ORDER BY created_at DESC
+         LIMIT 20`
+      )
+      .all(cutoff, ...params) as Array<{
+      id: string;
+      title: string;
+      body: string;
+      url: string;
+      tag: string;
+      action: string;
+      order_id: string;
+      require_interaction: number;
+      actions_json: string;
+      created_at: number;
+    }>;
+
+    const seenKeys = new Set<string>();
+    const deduped: typeof rows = [];
+    for (const r of rows) {
+      const dedupeKey = `${r.tag}|${r.title}|${r.body}|${r.created_at}`;
+      if (seenKeys.has(dedupeKey)) continue;
+      seenKeys.add(dedupeKey);
+      deduped.push(r);
+      if (deduped.length >= 10) break;
+    }
+
+    return deduped.map((row) => {
+      let parsedActions: Array<{ action: string; title: string }> | undefined;
+      try {
+        const arr = JSON.parse(row.actions_json) as unknown[];
+        if (Array.isArray(arr) && arr.length > 0) {
+          parsedActions = arr as Array<{ action: string; title: string }>;
+        }
+      } catch {
+        parsedActions = undefined;
+      }
+      return {
+        id: row.id,
+        title: row.title,
+        body: row.body,
+        url: sanitizeRelativeAppUrl(row.url),
+        tag: row.tag,
+        action: row.action,
+        orderId: row.order_id,
+        requireInteraction: row.require_interaction === 1,
+        actions: parsedActions,
+        createdAt: row.created_at
+      };
+    });
+  };
+
+  const sendWebPush = async (input: {
+    targetUids?: string[];
+    targetRoles?: Array<'customer' | 'delivery' | 'admin'>;
+    targetDeviceIds?: string[];
+    excludeUid?: string;
+    title: string;
+    body: string;
+    url?: string;
+    tag?: string;
+    action?: string;
+    orderId?: string;
+    requireInteraction?: boolean;
+    actions?: Array<{ action: string; title: string }>;
+  }): Promise<{ sent: number; failed: number; removedExpired: number }> => {
+    getOrCreateVapidKeys();
+    const uids = Array.from(
+      new Set((input.targetUids || []).map((u) => u.trim()).filter(Boolean))
+    ).slice(0, 100);
+    const roles = Array.from(
+      new Set(
+        (input.targetRoles || []).filter(
+          (r): r is 'customer' | 'delivery' | 'admin' =>
+            r === 'customer' || r === 'delivery' || r === 'admin'
+        )
+      )
+    );
+    const deviceIds = Array.from(
+      new Set((input.targetDeviceIds || []).map((d) => d.trim()).filter(isValidDeviceId))
+    ).slice(0, 100);
+
+    if (uids.length === 0 && roles.length === 0 && deviceIds.length === 0) {
+      return { sent: 0, failed: 0, removedExpired: 0 };
+    }
+
+    const safeTitle = String(input.title || 'FreshVeggie Delivery').slice(0, 120);
+    const safeBody = String(input.body || 'New notification').slice(0, 300);
+    const safeUrl = sanitizeRelativeAppUrl(input.url);
+    const safeTag = String(input.tag || 'freshveggie-alert').slice(0, 80);
+    const safeAction = String(input.action || 'open').slice(0, 40);
+    const safeOrderId = String(input.orderId || '').slice(0, 128);
+    const safeActions = Array.isArray(input.actions) ? input.actions.slice(0, 2) : undefined;
+    const now = Date.now();
+
+    // Persist lightweight background event queue so SW background periodic sync can surface alerts without Firebase tokens
+    try {
+      sqlite.prepare('DELETE FROM push_events WHERE created_at < ?').run(now - 24 * 60 * 60 * 1000);
+      const insertStmt = sqlite.prepare(
+        `INSERT INTO push_events
+          (id, target_uid, target_role, target_device_id, title, body, url, tag, action, order_id, require_interaction, actions_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      const actionsJson = JSON.stringify(safeActions || []);
+      for (const devId of deviceIds.slice(0, 10)) {
+        insertStmt.run(
+          `pev_${now}_${crypto.randomBytes(4).toString('hex')}`,
+          '',
+          '',
+          devId,
+          safeTitle,
+          safeBody,
+          safeUrl,
+          safeTag,
+          safeAction,
+          safeOrderId,
+          input.requireInteraction ? 1 : 0,
+          actionsJson,
+          now
+        );
+      }
+      for (const targetUid of uids.slice(0, 10)) {
+        insertStmt.run(
+          `pev_${now}_${crypto.randomBytes(4).toString('hex')}`,
+          targetUid,
+          '',
+          '',
+          safeTitle,
+          safeBody,
+          safeUrl,
+          safeTag,
+          safeAction,
+          safeOrderId,
+          input.requireInteraction ? 1 : 0,
+          actionsJson,
+          now
+        );
+      }
+      for (const targetRole of roles) {
+        insertStmt.run(
+          `pev_${now}_${crypto.randomBytes(4).toString('hex')}`,
+          '',
+          targetRole,
+          '',
+          safeTitle,
+          safeBody,
+          safeUrl,
+          safeTag,
+          safeAction,
+          safeOrderId,
+          input.requireInteraction ? 1 : 0,
+          actionsJson,
+          now
+        );
+      }
+    } catch {
+      // non-fatal queue persistence
+    }
+
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (uids.length > 0) {
+      clauses.push(`uid IN (${uids.map(() => '?').join(', ')})`);
+      params.push(...uids);
+    }
+    if (roles.length > 0) {
+      clauses.push(`role IN (${roles.map(() => '?').join(', ')})`);
+      params.push(...roles);
+    }
+    if (deviceIds.length > 0) {
+      clauses.push(`device_id IN (${deviceIds.map(() => '?').join(', ')})`);
+      params.push(...deviceIds);
+    }
+
+    const rows = sqlite
+      .prepare(
+        `SELECT endpoint, uid, subscription_json FROM push_subscriptions WHERE ${clauses.join(' OR ')} LIMIT 300`
+      )
+      .all(...params) as Array<{ endpoint: string; uid: string; subscription_json: string }>;
+
+    const filteredRows = input.excludeUid
+      ? rows.filter((r) => r.uid !== input.excludeUid)
+      : rows;
+
+    const payloadJson = JSON.stringify({
+      title: safeTitle,
+      body: safeBody,
+      url: safeUrl,
+      tag: safeTag,
+      action: safeAction,
+      orderId: safeOrderId,
+      requireInteraction: Boolean(input.requireInteraction),
+      actions: safeActions
+    });
+
+    let sent = 0;
+    let failed = 0;
+    let removedExpired = 0;
+
+    await Promise.all(
+      filteredRows.map(async (row) => {
+        if (!isValidPushEndpoint(row.endpoint)) return;
+        try {
+          const sub = JSON.parse(row.subscription_json) as webPush.PushSubscription;
+          await webPush.sendNotification(sub, payloadJson, { TTL: 3600 });
+          sent += 1;
+        } catch (err) {
+          failed += 1;
+          const statusCode =
+            err && typeof err === 'object' && 'statusCode' in err
+              ? Number((err as { statusCode?: unknown }).statusCode)
+              : 0;
+          if (statusCode === 404 || statusCode === 410) {
+            try {
+              sqlite
+                .prepare('DELETE FROM push_subscriptions WHERE endpoint = ?')
+                .run(row.endpoint);
+              removedExpired += 1;
+            } catch {
+              // ignore cleanup failure
+            }
+          }
+        }
+      })
+    );
+
+    return { sent, failed, removedExpired };
+  };
+
   // Read-Through Public Storefront Catalog from Cloud Firestore v1 REST API
   const fetchPublicCatalogFromFirestore = async (): Promise<CatalogBootstrapPayload | null> => {
     const projectId = firebaseMeta.projectId;
@@ -1330,7 +2089,7 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
 
     const fsQueryStart = performance.now();
     try {
-      const [prodRes, couponRes, areaRes, settingsRes] = await Promise.all([
+      const [prodRes, couponRes, areaRes, slotRes, settingsRes] = await Promise.all([
         fetch(`${base}:runQuery${apiKeyParam}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1381,6 +2140,24 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
                 }
               },
               limit: 200
+            }
+          }),
+          signal: AbortSignal.timeout(timeoutMs)
+        }),
+        fetch(`${base}:runQuery${apiKeyParam}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            structuredQuery: {
+              from: [{ collectionId: 'deliverySlots' }],
+              where: {
+                fieldFilter: {
+                  field: { fieldPath: 'sortOrder' },
+                  op: 'GREATER_THAN_OR_EQUAL',
+                  value: { integerValue: '0' }
+                }
+              },
+              limit: 500
             }
           }),
           signal: AbortSignal.timeout(timeoutMs)
@@ -1441,6 +2218,22 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
           });
       }
 
+      let deliverySlots: Array<Record<string, unknown>> = [];
+      if (slotRes.ok) {
+        const slotRows = (await slotRes.json()) as Array<{
+          document?: { name?: string; fields?: Record<string, unknown> };
+        }>;
+        deliverySlots = slotRows
+          .filter((r) => Boolean(r.document))
+          .map((r) => {
+            const decoded = decodeFirestoreDoc(r.document!);
+            return {
+              ...decoded,
+              id: String(decoded.id || decoded.__docId || '')
+            };
+          });
+      }
+
       let settings: Record<string, unknown> | null = null;
       if (settingsRes.ok) {
         const settingsDoc = (await settingsRes.json()) as {
@@ -1456,6 +2249,7 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
         products,
         coupons,
         serviceAreas,
+        deliverySlots,
         settings,
         source: 'firestore-rest',
         generatedAt: new Date().toISOString()
@@ -1491,6 +2285,7 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
           products: Array.isArray(parsed.products) ? parsed.products : [],
           coupons: Array.isArray(parsed.coupons) ? parsed.coupons : [],
           serviceAreas: Array.isArray(parsed.serviceAreas) ? parsed.serviceAreas : [],
+          deliverySlots: Array.isArray(parsed.deliverySlots) ? parsed.deliverySlots : [],
           settings: parsed.settings ?? null,
           source: 'sqlite-replica',
           generatedAt: parsed.generatedAt || new Date().toISOString()
@@ -1503,6 +2298,9 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
   };
 
   let inFlightCatalogPromise: Promise<CatalogBootstrapPayload> | null = null;
+  let slotsCacheVersion = 1;
+
+  const getSlotsCacheVersion = (): number => slotsCacheVersion;
 
   const getCatalogBootstrap = async (): Promise<CatalogBootstrapPayload> => {
     const cacheKey = 'catalog:bootstrap:v1';
@@ -1525,6 +2323,7 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
         products: [],
         coupons: [],
         serviceAreas: [],
+        deliverySlots: [],
         settings: null,
         source: 'sqlite-replica',
         generatedAt: new Date().toISOString()
@@ -1549,6 +2348,7 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
         products: [],
         coupons: [],
         serviceAreas: [],
+        deliverySlots: [],
         settings: null,
         source: 'sqlite-replica',
         generatedAt: new Date().toISOString()
@@ -1573,6 +2373,7 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
             products: Array.isArray(parsed.products) ? parsed.products : [],
             coupons: Array.isArray(parsed.coupons) ? parsed.coupons : [],
             serviceAreas: Array.isArray(parsed.serviceAreas) ? parsed.serviceAreas : [],
+            deliverySlots: Array.isArray(parsed.deliverySlots) ? parsed.deliverySlots : [],
             settings: parsed.settings ?? null,
             source: 'upstash-l2',
             generatedAt: parsed.generatedAt || new Date().toISOString()
@@ -1590,6 +2391,7 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
           products: [],
           coupons: [],
           serviceAreas: [],
+          deliverySlots: [],
           settings: null,
           source: 'upstash-l2',
           generatedAt: new Date().toISOString()
@@ -1602,6 +2404,7 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
       return {
         ...cached.value,
         serviceAreas: Array.isArray(cached.value.serviceAreas) ? cached.value.serviceAreas : [],
+        deliverySlots: Array.isArray(cached.value.deliverySlots) ? cached.value.deliverySlots : [],
         source: cached.tier === 'l2' ? 'upstash-l2' : 'memory-l1'
       };
     }
@@ -1632,6 +2435,7 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
           products: [],
           coupons: [],
           serviceAreas: [],
+          deliverySlots: [],
           settings: null,
           source: 'sqlite-replica',
           generatedAt: new Date().toISOString()
@@ -1646,6 +2450,12 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
 
   const invalidateCatalogCache = async (): Promise<void> => {
     inFlightCatalogPromise = null;
+    slotsCacheVersion += 1;
+    for (const k of l1Cache.keys()) {
+      if (k.startsWith('slots_')) {
+        l1Cache.delete(k);
+      }
+    }
     await invalidateKey('catalog:bootstrap:v1');
   };
 
@@ -1720,6 +2530,115 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
         }
       })();
     }
+  };
+
+  const deleteOrderHistoryRecords = async (input: DeleteOrderHistoryInput): Promise<{
+    ok: boolean;
+    deletedOrderArchiveRows: number;
+    deletedLedgerArchiveRows: number;
+    deletedProofFiles: number;
+    supabaseDeletedRows: number;
+    supabaseError: string | null;
+  }> => {
+    const cleanIds = Array.from(
+      new Set(
+        (Array.isArray(input.orderIds) ? input.orderIds : [])
+          .map((id) => (typeof id === 'string' ? id.trim() : ''))
+          .filter((id) => /^[a-zA-Z0-9_-]{1,128}$/.test(id))
+      )
+    ).slice(0, 2000);
+
+    const deleteLedger = Boolean(input.deleteLedgerEntries);
+    let deletedOrderArchiveRows = 0;
+    let deletedLedgerArchiveRows = 0;
+
+    if (cleanIds.length > 0) {
+      const tx = sqlite.transaction((ids: string[]) => {
+        for (let i = 0; i < ids.length; i += 200) {
+          const chunk = ids.slice(i, i + 200);
+          const placeholders = chunk.map(() => '?').join(',');
+          const orderRes = sqlite
+            .prepare(`DELETE FROM order_archive WHERE id IN (${placeholders})`)
+            .run(...chunk);
+          deletedOrderArchiveRows += orderRes.changes;
+          if (deleteLedger) {
+            const ledgerRes = sqlite
+              .prepare(`DELETE FROM wallet_ledger_archive WHERE order_id IN (${placeholders})`)
+              .run(...chunk);
+            deletedLedgerArchiveRows += ledgerRes.changes;
+          }
+        }
+      });
+      tx(cleanIds);
+    }
+
+    let supabaseDeletedRows = 0;
+    let supabaseError: string | null = null;
+    if (cleanIds.length > 0 && supabase && dbControlConfig.archivalSyncEnabled) {
+      const sStart = performance.now();
+      try {
+        for (let i = 0; i < cleanIds.length; i += 200) {
+          const chunk = cleanIds.slice(i, i + 200);
+          const { error, count } = await supabase
+            .from('order_archive')
+            .delete({ count: 'exact' })
+            .in('id', chunk);
+          if (error) {
+            supabaseError = formatSupabaseError(error.message, error.code);
+          } else {
+            supabaseDeletedRows += count || 0;
+          }
+          if (deleteLedger) {
+            const { error: ledErr } = await supabase
+              .from('wallet_ledger_archive')
+              .delete()
+              .in('order_id', chunk);
+            if (ledErr && !supabaseError) {
+              supabaseError = formatSupabaseError(ledErr.message, ledErr.code);
+            }
+          }
+        }
+        recordApiUsage('cloud-supabase-postgres', {
+          latencyMs: performance.now() - sStart,
+          statusCode: supabaseError ? 500 : 200
+        });
+      } catch (err) {
+        supabaseError = err instanceof Error ? err.message : 'Supabase delete failed';
+        recordApiUsage('cloud-supabase-postgres', {
+          latencyMs: performance.now() - sStart,
+          statusCode: 503
+        });
+      }
+    }
+
+    let deletedProofFiles = 0;
+    const rawProofUrls = Array.isArray(input.proofImageUrls) ? input.proofImageUrls.slice(0, 500) : [];
+    const baseUploadsDir = path.resolve(uploadsDir) + path.sep;
+    for (const rawUrl of rawProofUrls) {
+      if (typeof rawUrl !== 'string' || !rawUrl.includes('/uploads/proof_')) continue;
+      const cleanedPath = rawUrl.split('?')[0];
+      const fileName = path.posix.basename(cleanedPath);
+      if (!/^proof_[a-zA-Z0-9_.-]+\.(jpg|jpeg|png|webp)$/i.test(fileName)) continue;
+      const resolvedFile = path.resolve(uploadsDir, fileName);
+      if (!resolvedFile.startsWith(baseUploadsDir)) continue;
+      try {
+        if (fs.existsSync(resolvedFile)) {
+          await fs.promises.unlink(resolvedFile);
+          deletedProofFiles += 1;
+        }
+      } catch {
+        // non-fatal file unlink error
+      }
+    }
+
+    return {
+      ok: true,
+      deletedOrderArchiveRows,
+      deletedLedgerArchiveRows,
+      deletedProofFiles,
+      supabaseDeletedRows,
+      supabaseError
+    };
   };
 
   const archiveLedgerEntry = async (entry: ArchiveLedgerPayload): Promise<void> => {
@@ -3367,13 +4286,24 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
     getCached,
     setCached,
     invalidateCatalogCache,
+    getSlotsCacheVersion,
     checkRateLimit,
     getCatalogBootstrap,
     archiveOrder,
     archiveLedgerEntry,
+    deleteOrderHistoryRecords,
     getSqlAnalyticsSummary,
     uploadMediaObject,
     verifyFirebaseAdminToken,
+    verifyFirebaseUserToken,
+    getVapidPublicKey,
+    issueDevicePushToken,
+    verifyDevicePushToken,
+    upsertPushSubscription,
+    removePushSubscription,
+    getUserPushSubscriptionCount,
+    getPendingPushEvents,
+    sendWebPush,
     getDbControlConfig,
     updateDbControlConfig,
     getServerControlConfig,

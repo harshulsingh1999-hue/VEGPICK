@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useStore } from '../context/StoreContext';
 import { useAuth } from '../context/AuthContext';
 import {
@@ -8,7 +8,7 @@ import {
   getAdminSettlementSummary,
   luhnCheckCard
 } from '../lib/utils';
-import { Order } from '../lib/data';
+import { DEFAULT_DAILY_SLOT_TEMPLATES, Order } from '../lib/data';
 import { useNavigate } from 'react-router-dom';
 import {
   CreditCard,
@@ -28,11 +28,32 @@ import { useToast } from '../context/ToastContext';
 import { PhoneOtpAuthCard } from '../components/PhoneOtpAuthCard';
 import { apiFetch } from '../lib/apiClient';
 
+interface ApiSlotOption {
+  id: string;
+  label: string;
+  startTime: string;
+  endTime: string;
+  cutoffMinutes: number;
+  maxOrders: number;
+  notes?: string;
+  scheduleType?: 'date' | 'daily' | 'default';
+}
+
 interface ApiSlotDay {
   dayOffset: number;
   isoDate: string;
   slots: string[];
+  slotDetails?: ApiSlotOption[];
+  hasDateOverride?: boolean;
+  closedByAdmin?: boolean;
 }
+
+const parseTimeMinutes = (timeStr: string): number => {
+  const [hStr, mStr] = (timeStr || '00:00').split(':');
+  const h = Number(hStr);
+  const m = Number(mStr);
+  return (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0);
+};
 
 export const Checkout = () => {
   const {
@@ -41,6 +62,7 @@ export const Checkout = () => {
     clearCart,
     coupons,
     appSettings,
+    deliverySlots,
     refreshCatalog,
     checkPincodeServiceability
   } = useStore();
@@ -62,7 +84,8 @@ export const Checkout = () => {
   const [newZip, setNewZip] = useState('');
 
   const [slotDays, setSlotDays] = useState<ApiSlotDay[]>([]);
-  const [selectedDate, setSelectedDate] = useState(0);
+  const [selectedDateIso, setSelectedDateIso] = useState(() => format(new Date(), 'yyyy-MM-dd'));
+  const [userPickedDate, setUserPickedDate] = useState(false);
   const [selectedSlot, setSelectedSlot] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<Order['paymentMethod']>('upi');
   const [upiTransactionRef, setUpiTransactionRef] = useState('');
@@ -110,31 +133,146 @@ export const Checkout = () => {
       .then((data: { days?: ApiSlotDay[] }) => {
         if (active && Array.isArray(data.days)) {
           setSlotDays(data.days);
-          // Default to tomorrow if today has no remaining slots
-          if (data.days[0]?.slots.length === 0 && data.days[1]?.slots.length > 0) {
-            setSelectedDate(1);
-          }
         }
       })
       .catch(() => {
-        // Fallback slot calculation if network temporarily unavailable
-        const fallbackSlots = [
-          '6:00 AM - 8:00 AM',
-          '8:00 AM - 10:00 AM',
-          '10:00 AM - 12:00 PM',
-          '4:00 PM - 5:00 PM',
-          '5:00 PM - 6:00 PM',
-          '6:00 PM - 7:00 PM',
-          '7:00 PM - 8:00 PM'
-        ];
-        if (active) {
-          setSlotDays([0, 1, 2].map((d) => ({ dayOffset: d, isoDate: '', slots: fallbackSlots })));
-        }
+        // Fallback relies directly on StoreContext deliverySlots / defaults below
       });
     return () => {
       active = false;
     };
-  }, []);
+  }, [deliverySlots.length]);
+
+  const checkoutSlotDays = useMemo(() => {
+    const now = new Date();
+    const todayLocalIso = format(now, 'yyyy-MM-dd');
+    const currentLocalMinutes = now.getHours() * 60 + now.getMinutes();
+
+    const apiByIso = new Map<string, ApiSlotDay>();
+    slotDays.forEach((d) => {
+      if (d.isoDate) apiByIso.set(d.isoDate, d);
+    });
+
+    // Prefer live StoreContext deliverySlots when populated; otherwise use /api/slots
+    const hasStoreCustom = deliverySlots.length > 0;
+    const candidateIsos = new Set<string>();
+    for (let i = 0; i <= 6; i++) {
+      candidateIsos.add(format(addDays(now, i), 'yyyy-MM-dd'));
+    }
+    if (hasStoreCustom) {
+      deliverySlots.forEach((s) => {
+        if (s.scheduleType === 'date' && s.slotDate >= todayLocalIso) {
+          candidateIsos.add(s.slotDate);
+        }
+      });
+    } else {
+      slotDays.forEach((d) => {
+        if (d.isoDate >= todayLocalIso) {
+          candidateIsos.add(d.isoDate);
+        }
+      });
+    }
+
+    const sortedIsos = Array.from(candidateIsos).sort().slice(0, 14);
+    const day0 = format(now, 'yyyy-MM-dd');
+    const day1 = format(addDays(now, 1), 'yyyy-MM-dd');
+    const day2 = format(addDays(now, 2), 'yyyy-MM-dd');
+
+    const built = sortedIsos.map((isoDate) => {
+      const dateObj = new Date(`${isoDate}T12:00:00`);
+      const tag =
+        isoDate === day0 ? 'Today' : isoDate === day1 ? 'Tomorrow' : format(dateObj, 'EEE');
+      const shortDate = format(dateObj, 'd MMM');
+      const fullFormatted = format(dateObj, 'EEE, MMM d');
+
+      let rawDetails: ApiSlotOption[] = [];
+      let closedByAdmin = false;
+
+      if (hasStoreCustom) {
+        const dateOverrides = deliverySlots.filter(
+          (s) => s.scheduleType === 'date' && s.slotDate === isoDate
+        );
+        const hasOverride = dateOverrides.length > 0;
+        const sourceList = hasOverride
+          ? dateOverrides
+          : deliverySlots.filter((s) => s.scheduleType === 'daily');
+        const activeList = sourceList
+          .filter((s) => s.isActive)
+          .sort((a, b) => a.sortOrder - b.sortOrder || a.startTime.localeCompare(b.startTime));
+        closedByAdmin = hasOverride && activeList.length === 0;
+        rawDetails = activeList.map((s) => ({
+          id: s.id,
+          label: s.label,
+          startTime: s.startTime,
+          endTime: s.endTime,
+          cutoffMinutes: s.cutoffMinutes || 0,
+          maxOrders: s.maxOrders || 0,
+          notes: s.notes,
+          scheduleType: s.scheduleType
+        }));
+      } else {
+        const apiDay = apiByIso.get(isoDate);
+        if (apiDay && Array.isArray(apiDay.slotDetails)) {
+          rawDetails = apiDay.slotDetails;
+          closedByAdmin = Boolean(apiDay.closedByAdmin);
+        } else if (isoDate === day0 || isoDate === day1 || isoDate === day2) {
+          rawDetails = DEFAULT_DAILY_SLOT_TEMPLATES.map((tpl, idx) => ({
+            id: `default_${idx}`,
+            label: tpl.label,
+            startTime: tpl.startTime,
+            endTime: tpl.endTime,
+            cutoffMinutes: tpl.cutoffMinutes,
+            maxOrders: tpl.maxOrders,
+            notes: tpl.notes,
+            scheduleType: 'default'
+          }));
+        }
+      }
+
+      const openSlots = rawDetails.filter((slot) => {
+        if (isoDate < todayLocalIso) return false;
+        if (isoDate > todayLocalIso) return true;
+        return currentLocalMinutes < parseTimeMinutes(slot.startTime) - (slot.cutoffMinutes || 0);
+      });
+
+      return {
+        isoDate,
+        tag,
+        shortDate,
+        fullFormatted,
+        closedByAdmin,
+        openSlots,
+        isDefaultThreeDay: isoDate === day0 || isoDate === day1 || isoDate === day2
+      };
+    });
+
+    // Always display Today/Tomorrow/Day+2, plus any additional future dates that have open slots
+    return built
+      .filter((d) => d.isDefaultThreeDay || d.openSlots.length > 0)
+      .slice(0, 7);
+  }, [slotDays, deliverySlots]);
+
+  useEffect(() => {
+    if (checkoutSlotDays.length === 0) return;
+    const current = checkoutSlotDays.find((d) => d.isoDate === selectedDateIso);
+    if (!current || (!userPickedDate && current.openSlots.length === 0)) {
+      const firstOpen = checkoutSlotDays.find((d) => d.openSlots.length > 0) || checkoutSlotDays[0];
+      if (firstOpen && firstOpen.isoDate !== selectedDateIso) {
+        setSelectedDateIso(firstOpen.isoDate);
+        setSelectedSlot('');
+      }
+    }
+  }, [checkoutSlotDays, selectedDateIso, userPickedDate]);
+
+  const activeDayEntry =
+    checkoutSlotDays.find((d) => d.isoDate === selectedDateIso) || checkoutSlotDays[0];
+  const availableSlotOptions = activeDayEntry?.openSlots || [];
+
+  useEffect(() => {
+    if (selectedSlot && !availableSlotOptions.some((s) => s.label === selectedSlot)) {
+      setSelectedSlot('');
+    }
+  }, [availableSlotOptions, selectedSlot]);
 
   const activeAddressObj =
     user?.addresses?.find((a) => a.id === selectedAddress) || user?.addresses?.[0] || null;
@@ -154,13 +292,6 @@ export const Checkout = () => {
   const taxAmount = Math.round((cartTotal * taxRate) / 100);
   const deliveryFee = cartTotal >= freeThreshold ? 0 : baseFee;
   const finalTotal = Math.max(0, Math.round(cartTotal) + taxAmount + deliveryFee - discount);
-
-  const availableSlots =
-    slotDays.find((d) => d.dayOffset === selectedDate)?.slots || [
-      '8:00 AM - 10:00 AM',
-      '4:00 PM - 6:00 PM',
-      '6:00 PM - 8:00 PM'
-    ];
 
   const acceptUpi = appSettings?.acceptUpi !== false;
   const acceptDebitCard = appSettings?.acceptDebitCard !== false;
@@ -446,9 +577,10 @@ export const Checkout = () => {
       const appliedCouponCode =
         verifiedDiscount > 0 ? (activeCouponObj?.code || normalizedCouponInput).trim().toUpperCase() : '';
 
+      const datePrefix = activeDayEntry?.fullFormatted || format(new Date(), 'EEE, MMM d');
       const slotText = selectedSlot
-        ? `${format(addDays(new Date(), selectedDate), 'EEE, MMM d')} - ${selectedSlot}`
-        : `${format(addDays(new Date(), selectedDate), 'EEE, MMM d')} - Standard Delivery`;
+        ? `${datePrefix} - ${selectedSlot}`
+        : `${datePrefix} - Standard Delivery`;
 
       orderPlacedRef.current = true;
       await placeOrder({
@@ -784,39 +916,58 @@ export const Checkout = () => {
 
         {step === 3 && (
           <div className="space-y-4">
-            <div className="flex gap-2 overflow-x-auto pb-2">
-              {[0, 1, 2].map((day) => (
+            <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar">
+              {checkoutSlotDays.map((day) => (
                 <button
-                  key={day}
+                  key={day.isoDate}
                   type="button"
                   onClick={() => {
-                    setSelectedDate(day);
+                    setUserPickedDate(true);
+                    setSelectedDateIso(day.isoDate);
                     setSelectedSlot('');
                   }}
-                  className={`flex-1 min-w-[100px] p-3 rounded-lg border text-center ${selectedDate === day ? 'border-green-500 bg-green-50 text-green-700' : 'border-gray-200'}`}
+                  className={`flex-1 min-w-[96px] p-3 rounded-lg border text-center transition ${
+                    (activeDayEntry?.isoDate || selectedDateIso) === day.isoDate
+                      ? 'border-green-500 bg-green-50 text-green-700'
+                      : day.openSlots.length === 0
+                      ? 'border-gray-200 bg-gray-50 text-gray-400'
+                      : 'border-gray-200 hover:border-green-300'
+                  }`}
                 >
-                  <p className="text-xs font-medium uppercase">
-                    {day === 0 ? 'Today' : day === 1 ? 'Tomorrow' : format(addDays(new Date(), day), 'EEE')}
+                  <p className="text-xs font-medium uppercase">{day.tag}</p>
+                  <p className="font-bold">{day.shortDate}</p>
+                  <p className="text-[10px] mt-0.5 opacity-75">
+                    {day.openSlots.length > 0 ? `${day.openSlots.length} slots` : 'Closed'}
                   </p>
-                  <p className="font-bold">{format(addDays(new Date(), day), 'd MMM')}</p>
                 </button>
               ))}
             </div>
 
-            {availableSlots.length === 0 ? (
+            {availableSlotOptions.length === 0 ? (
               <p className="text-xs text-amber-700 bg-amber-50 p-3 rounded-lg border border-amber-200">
-                All delivery slots for today have passed. Please choose Tomorrow or the next day.
+                {activeDayEntry?.closedByAdmin
+                  ? `Delivery slots for ${activeDayEntry.shortDate} are currently closed by store administration. Please choose another date.`
+                  : 'All delivery slots for this date have passed or are unavailable. Please choose another scheduled date.'}
               </p>
             ) : (
-              <div className="grid grid-cols-2 gap-2 max-h-60 overflow-y-auto">
-                {availableSlots.map((slot) => (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-60 overflow-y-auto">
+                {availableSlotOptions.map((slot) => (
                   <button
-                    key={slot}
+                    key={slot.id || slot.label}
                     type="button"
-                    onClick={() => setSelectedSlot(slot)}
-                    className={`p-2 text-xs border rounded-lg ${selectedSlot === slot ? 'border-green-500 bg-green-50 text-green-700 font-semibold' : 'border-gray-200'}`}
+                    onClick={() => setSelectedSlot(slot.label)}
+                    className={`p-2.5 text-left text-xs border rounded-lg transition ${
+                      selectedSlot === slot.label
+                        ? 'border-green-500 bg-green-50 text-green-700 font-semibold'
+                        : 'border-gray-200 hover:border-green-300'
+                    }`}
                   >
-                    {slot}
+                    <span className="block">{slot.label}</span>
+                    {slot.notes && (
+                      <span className="block text-[10px] opacity-75 font-normal mt-0.5">
+                        {slot.notes}
+                      </span>
+                    )}
                   </button>
                 ))}
               </div>
@@ -834,7 +985,7 @@ export const Checkout = () => {
         )}
         {step > 3 && (
           <div className="pl-11 text-gray-600 text-sm">
-            <p>{format(addDays(new Date(), selectedDate), 'EEE, MMM d')} | {selectedSlot}</p>
+            <p>{activeDayEntry?.fullFormatted || format(new Date(), 'EEE, MMM d')} | {selectedSlot}</p>
           </div>
         )}
       </div>

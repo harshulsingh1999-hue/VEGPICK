@@ -55,7 +55,10 @@ async function startServer() {
     if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) {
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        'Content-Type, Authorization, X-Push-Device-Token'
+      );
       if (req.method === 'OPTIONS') {
         res.status(204).end();
         return;
@@ -92,7 +95,9 @@ async function startServer() {
       else if (p === '/orders/quote') endpointId = 'api-quote';
       else if (p === '/slots') endpointId = 'api-slots';
       else if (p === '/media/upload') endpointId = 'api-media-upload';
-      else if (p === '/archive/order' || p === '/archive/ledger') endpointId = 'api-archive-order';
+      else if (p === '/archive/order' || p === '/archive/ledger' || p.startsWith('/admin/orders')) {
+        endpointId = 'api-archive-order';
+      }
       else if (p === '/analytics/summary') endpointId = 'api-analytics-summary';
       else if (p.startsWith('/admin/databases')) endpointId = 'api-admin-databases';
       else if (p.startsWith('/admin/servers')) endpointId = 'api-admin-servers';
@@ -171,6 +176,52 @@ async function startServer() {
     next();
   };
 
+  interface AuthenticatedRequest extends express.Request {
+    authUid?: string;
+    authEmail?: string;
+    authIsAdmin?: boolean;
+    verifiedDeviceId?: string;
+  }
+
+  const resolvePushCaller: express.RequestHandler = async (req, _res, next) => {
+    const authReq = req as AuthenticatedRequest;
+    const authHeader = req.headers.authorization || '';
+    const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    if (bearerToken) {
+      const check = await cloud.verifyFirebaseUserToken(bearerToken);
+      if (check.authenticated && check.uid) {
+        authReq.authUid = check.uid;
+        authReq.authEmail = check.email;
+        authReq.authIsAdmin = Boolean(check.isAdmin);
+      }
+    }
+
+    const rawDeviceToken =
+      typeof req.headers['x-push-device-token'] === 'string'
+        ? req.headers['x-push-device-token'].trim()
+        : '';
+    if (rawDeviceToken) {
+      const devCheck = cloud.verifyDevicePushToken(rawDeviceToken);
+      if (devCheck.valid && devCheck.deviceId) {
+        authReq.verifiedDeviceId = devCheck.deviceId;
+      }
+    }
+    next();
+  };
+
+  const applyPushRateLimit =
+    (bucket: 'push-sub' | 'push-notify', maxPerMin: number): express.RequestHandler =>
+    async (req, res, next) => {
+      const clientIp = (req.ip || req.socket.remoteAddress || 'unknown').slice(0, 64);
+      const result = await cloud.checkRateLimit(bucket, clientIp, maxPerMin, 60);
+      if (!result.allowed) {
+        res.setHeader('Retry-After', String(result.resetSeconds));
+        res.status(429).json({ error: 'Too many push requests. Please retry shortly.' });
+        return;
+      }
+      next();
+    };
+
   // Health & Multi-Cloud Diagnostics API
   app.get('/api/health', (_req, res) => {
     const diag = cloud.getDiagnostics();
@@ -239,6 +290,7 @@ async function startServer() {
             p: payload.products,
             c: payload.coupons,
             a: payload.serviceAreas,
+            d: payload.deliverySlots,
             s: payload.settings
           })
         )
@@ -341,14 +393,35 @@ async function startServer() {
     }
   });
 
-  // Real-time Delivery Slot Availability API (L1/L2 60s TTL + Edge Cache)
+  // Real-time Delivery Slot Availability API (Dynamic Admin Schedule + L1/L2 + Edge Cache)
   app.get('/api/slots', async (_req, res) => {
     const now = new Date();
     const currentHour = now.getHours();
-    const cacheKey = `slots_${now.toISOString().split('T')[0]}_${currentHour}`;
-    const cached = await cloud.getCached<{
-      days: Array<{ dayOffset: number; isoDate: string; slots: string[] }>;
-    }>(cacheKey);
+    const currentMinutes = currentHour * 60 + now.getMinutes();
+    const todayIso = now.toISOString().split('T')[0];
+    const slotsVersion = cloud.getSlotsCacheVersion();
+    const cacheKey = `slots_v${slotsVersion}_${todayIso}_${currentHour}`;
+
+    interface ApiSlotOption {
+      id: string;
+      label: string;
+      startTime: string;
+      endTime: string;
+      cutoffMinutes: number;
+      maxOrders: number;
+      notes: string;
+      scheduleType: 'date' | 'daily' | 'default';
+    }
+    interface ApiSlotDayResponse {
+      dayOffset: number;
+      isoDate: string;
+      slots: string[];
+      slotDetails: ApiSlotOption[];
+      hasDateOverride?: boolean;
+      closedByAdmin?: boolean;
+    }
+
+    const cached = await cloud.getCached<{ days: ApiSlotDayResponse[]; customConfigured: boolean }>(cacheKey);
 
     res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=60, stale-while-revalidate=120');
 
@@ -358,32 +431,141 @@ async function startServer() {
       return;
     }
 
-    const allDailySlots = [
-      { id: 'morning_1', label: '6:00 AM - 8:00 AM', startHour: 6 },
-      { id: 'morning_2', label: '8:00 AM - 10:00 AM', startHour: 8 },
-      { id: 'morning_3', label: '10:00 AM - 12:00 PM', startHour: 10 },
-      { id: 'evening_1', label: '4:00 PM - 5:00 PM', startHour: 16 },
-      { id: 'evening_2', label: '5:00 PM - 6:00 PM', startHour: 17 },
-      { id: 'evening_3', label: '6:00 PM - 7:00 PM', startHour: 18 },
-      { id: 'evening_4', label: '7:00 PM - 8:00 PM', startHour: 19 },
-      { id: 'evening_5', label: '8:00 PM - 9:00 PM', startHour: 20 }
+    const bootstrap = await cloud.getCatalogBootstrap();
+    const configuredRaw = Array.isArray(bootstrap.deliverySlots) ? bootstrap.deliverySlots : [];
+
+    const parseTimeMinutes = (hhmm: string): number => {
+      const m = /^(\d{2}):(\d{2})$/.exec(hhmm || '');
+      if (!m) return 0;
+      return Number(m[1]) * 60 + Number(m[2]);
+    };
+
+    const normalizeSlotRecord = (raw: Record<string, unknown>, idx: number) => {
+      const scheduleType: 'date' | 'daily' = raw.scheduleType === 'date' ? 'date' : 'daily';
+      const slotDate = typeof raw.slotDate === 'string' ? raw.slotDate.trim().slice(0, 10) : '';
+      const startTime =
+        typeof raw.startTime === 'string' && /^\d{2}:\d{2}$/.test(raw.startTime)
+          ? raw.startTime
+          : '08:00';
+      const endTime =
+        typeof raw.endTime === 'string' && /^\d{2}:\d{2}$/.test(raw.endTime)
+          ? raw.endTime
+          : '10:00';
+      const label =
+        typeof raw.label === 'string' && raw.label.trim()
+          ? raw.label.trim().slice(0, 80)
+          : `${startTime} - ${endTime}`;
+      const isActive = raw.isActive !== false;
+      const maxOrders = Math.max(0, Number(raw.maxOrders) || 0);
+      const cutoffMinutes = Math.max(0, Math.min(1440, Number(raw.cutoffMinutes) || 0));
+      const sortOrder = Number.isFinite(Number(raw.sortOrder)) ? Number(raw.sortOrder) : idx;
+      const notes = typeof raw.notes === 'string' ? raw.notes.trim().slice(0, 240) : '';
+      return {
+        id: String(raw.id || `slot_${idx}`),
+        scheduleType,
+        slotDate,
+        startTime,
+        endTime,
+        label,
+        isActive,
+        maxOrders,
+        cutoffMinutes,
+        sortOrder,
+        notes
+      };
+    };
+
+    const parsedSlots = configuredRaw.map(normalizeSlotRecord);
+    const customConfigured = parsedSlots.length > 0;
+
+    const defaultDailySlots: Array<ApiSlotOption & { sortOrder: number }> = [
+      { id: 'morning_1', label: '6:00 AM - 8:00 AM', startTime: '06:00', endTime: '08:00', cutoffMinutes: 0, maxOrders: 0, notes: '', scheduleType: 'default', sortOrder: 1 },
+      { id: 'morning_2', label: '8:00 AM - 10:00 AM', startTime: '08:00', endTime: '10:00', cutoffMinutes: 0, maxOrders: 0, notes: '', scheduleType: 'default', sortOrder: 2 },
+      { id: 'morning_3', label: '10:00 AM - 12:00 PM', startTime: '10:00', endTime: '12:00', cutoffMinutes: 0, maxOrders: 0, notes: '', scheduleType: 'default', sortOrder: 3 },
+      { id: 'evening_1', label: '4:00 PM - 5:00 PM', startTime: '16:00', endTime: '17:00', cutoffMinutes: 0, maxOrders: 0, notes: '', scheduleType: 'default', sortOrder: 4 },
+      { id: 'evening_2', label: '5:00 PM - 6:00 PM', startTime: '17:00', endTime: '18:00', cutoffMinutes: 0, maxOrders: 0, notes: '', scheduleType: 'default', sortOrder: 5 },
+      { id: 'evening_3', label: '6:00 PM - 7:00 PM', startTime: '18:00', endTime: '19:00', cutoffMinutes: 0, maxOrders: 0, notes: '', scheduleType: 'default', sortOrder: 6 },
+      { id: 'evening_4', label: '7:00 PM - 8:00 PM', startTime: '19:00', endTime: '20:00', cutoffMinutes: 0, maxOrders: 0, notes: '', scheduleType: 'default', sortOrder: 7 },
+      { id: 'evening_5', label: '8:00 PM - 9:00 PM', startTime: '20:00', endTime: '21:00', cutoffMinutes: 0, maxOrders: 0, notes: '', scheduleType: 'default', sortOrder: 8 }
     ];
 
-    const days = [0, 1, 2].map((offset) => {
-      const targetDate = new Date(now);
-      targetDate.setDate(now.getDate() + offset);
-      const slots = allDailySlots.filter((slot) =>
-        offset === 0 ? slot.startHour > currentHour : true
-      );
+    const dateOverrides = new Map<string, ReturnType<typeof normalizeSlotRecord>[]>();
+    const dailyConfigured: ReturnType<typeof normalizeSlotRecord>[] = [];
+
+    for (const s of parsedSlots) {
+      if (s.scheduleType === 'date' && /^\d{4}-\d{2}-\d{2}$/.test(s.slotDate)) {
+        const list = dateOverrides.get(s.slotDate) || [];
+        list.push(s);
+        dateOverrides.set(s.slotDate, list);
+      } else if (s.scheduleType === 'daily') {
+        dailyConfigured.push(s);
+      }
+    }
+
+    const offsetSet = new Set<number>([-1, 0, 1, 2, 3, 4, 5, 6]);
+    const todayMidnightUtc = Date.parse(`${todayIso}T00:00:00Z`);
+    for (const dStr of dateOverrides.keys()) {
+      const diffDays = Math.round((Date.parse(`${dStr}T00:00:00Z`) - todayMidnightUtc) / 86_400_000);
+      if (diffDays >= -1 && diffDays <= 30) {
+        offsetSet.add(diffDays);
+      }
+    }
+    const sortedOffsets = Array.from(offsetSet).sort((a, b) => a - b);
+
+    const days: ApiSlotDayResponse[] = sortedOffsets.map((offset) => {
+      const targetDate = new Date(todayMidnightUtc + offset * 86_400_000);
+      const isoDate = targetDate.toISOString().split('T')[0];
+
+      if (!customConfigured) {
+        const activeDefaults = offset >= -1 && offset <= 2 ? defaultDailySlots : [];
+        const visibleSlots = activeDefaults.filter((slot) =>
+          offset === 0 ? parseTimeMinutes(slot.startTime) > currentMinutes : offset > 0
+        );
+        return {
+          dayOffset: offset,
+          isoDate,
+          slots: visibleSlots.map((s) => s.label),
+          slotDetails: activeDefaults.map(({ sortOrder: _so, ...rest }) => rest),
+          hasDateOverride: false,
+          closedByAdmin: false
+        };
+      }
+
+      const hasOverride = dateOverrides.has(isoDate);
+      const rawDayList = hasOverride ? dateOverrides.get(isoDate)! : dailyConfigured;
+      const activeDaySlots = rawDayList
+        .filter((s) => s.isActive)
+        .sort((a, b) => a.sortOrder - b.sortOrder || a.startTime.localeCompare(b.startTime));
+
+      const slotDetails: ApiSlotOption[] = activeDaySlots.map((s) => ({
+        id: s.id,
+        label: s.label,
+        startTime: s.startTime,
+        endTime: s.endTime,
+        cutoffMinutes: s.cutoffMinutes,
+        maxOrders: s.maxOrders,
+        notes: s.notes,
+        scheduleType: s.scheduleType
+      }));
+
+      const openNowSlots = slotDetails.filter((slot) => {
+        if (offset < 0) return false;
+        if (offset > 0) return true;
+        return currentMinutes < parseTimeMinutes(slot.startTime) - slot.cutoffMinutes;
+      });
+
       return {
         dayOffset: offset,
-        isoDate: targetDate.toISOString().split('T')[0],
-        slots: slots.map((s) => s.label)
+        isoDate,
+        slots: openNowSlots.map((s) => s.label),
+        slotDetails,
+        hasDateOverride: hasOverride,
+        closedByAdmin: hasOverride && slotDetails.length === 0
       };
     });
 
     const slotsTtlSec = cloud.getServerControlConfig().slotsTtlSeconds || 60;
-    const payload = { days };
+    const payload = { days, customConfigured };
     await cloud.setCached(cacheKey, payload, slotsTtlSec * 1000);
     res.setHeader('X-Cache', 'MISS');
     res.json(payload);
@@ -611,6 +793,314 @@ async function startServer() {
     res.status(202).json({ ok: true });
   });
 
+  app.post('/api/admin/orders/delete-history', requireAdmin, async (req, res) => {
+    const b = (req.body || {}) as {
+      orderIds?: unknown[];
+      deleteLedgerEntries?: boolean;
+      proofImageUrls?: unknown[];
+    };
+    const rawIds = Array.isArray(b.orderIds) ? b.orderIds : [];
+    const orderIds = rawIds.filter((id): id is string => typeof id === 'string');
+    if (orderIds.length === 0) {
+      res.status(400).json({ error: 'At least one orderId is required for manual history deletion.' });
+      return;
+    }
+
+    const proofImageUrls = Array.isArray(b.proofImageUrls)
+      ? b.proofImageUrls.filter((u): u is string => typeof u === 'string')
+      : [];
+
+    analyticsMemo = null;
+    try {
+      const result = await cloud.deleteOrderHistoryRecords({
+        orderIds,
+        deleteLedgerEntries: Boolean(b.deleteLedgerEntries),
+        proofImageUrls
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Unable to remove order history from archive databases.'
+      });
+    }
+  });
+
+  // Cross-Platform Web Push Notification APIs (Android + iOS 16.4+ Home Screen PWA + Web)
+  // Supports both Firebase-signed-in sessions AND tokenless background device push sessions (X-Push-Device-Token)
+  app.get('/api/push/vapid-public-key', (_req, res) => {
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    res.json({
+      publicKey: cloud.getVapidPublicKey(),
+      supported: true
+    });
+  });
+
+  app.get('/api/push/status', resolvePushCaller, (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const uid = authReq.authUid || '';
+    const deviceId = authReq.verifiedDeviceId || '';
+    if (!uid && !deviceId) {
+      res.status(401).json({ error: 'Device push token or session required.' });
+      return;
+    }
+    res.json({
+      pushEnabled: true,
+      subscribedDevices: cloud.getUserPushSubscriptionCount(uid || undefined, deviceId || undefined),
+      hasDeviceToken: Boolean(deviceId)
+    });
+  });
+
+  app.post(
+    '/api/push/subscribe',
+    applyPushRateLimit('push-sub', 40),
+    resolvePushCaller,
+    async (req, res) => {
+      const authReq = req as AuthenticatedRequest;
+      const uid = authReq.authUid || '';
+      const body = (req.body || {}) as {
+        subscription?: { endpoint?: string; keys?: { p256dh?: string; auth?: string } };
+        deviceId?: string;
+        role?: string;
+        platform?: string;
+        sendTest?: boolean;
+      };
+
+      const role: 'customer' | 'delivery' | 'admin' =
+        body.role === 'admin' && authReq.authIsAdmin
+          ? 'admin'
+          : body.role === 'delivery'
+          ? 'delivery'
+          : 'customer';
+      const platform: 'android' | 'ios' | 'web' =
+        body.platform === 'android' || body.platform === 'ios' ? body.platform : 'web';
+
+      const result = cloud.upsertPushSubscription({
+        uid: uid || undefined,
+        deviceId: typeof body.deviceId === 'string' ? body.deviceId : undefined,
+        verifiedDeviceId: authReq.verifiedDeviceId,
+        role,
+        platform,
+        subscription: {
+          endpoint: String(body.subscription?.endpoint || ''),
+          keys: {
+            p256dh: String(body.subscription?.keys?.p256dh || ''),
+            auth: String(body.subscription?.keys?.auth || '')
+          }
+        },
+        userAgent: req.headers['user-agent'] || ''
+      });
+
+      if (!result.ok) {
+        res.status(400).json({ error: 'Valid HTTPS Web Push subscription payload is required.' });
+        return;
+      }
+
+      const issuedDeviceToken = cloud.issueDevicePushToken(result.deviceId);
+
+      if (body.sendTest) {
+        await cloud.sendWebPush({
+          targetDeviceIds: [result.deviceId],
+          targetUids: uid ? [uid] : [],
+          title: 'FreshVeggie Background Push Active',
+          body:
+            role === 'delivery'
+              ? 'Background dispatch, order updates, and GPS sync alerts are active on this device.'
+              : 'Background order tracking and store alerts are active on this device.',
+          url:
+            role === 'delivery'
+              ? '/delivery/dashboard'
+              : role === 'admin'
+              ? '/admin/dashboard'
+              : '/orders',
+          tag: `push-welcome-${result.deviceId}`
+        });
+      }
+
+      res.json({
+        ok: true,
+        deviceId: result.deviceId,
+        deviceToken: issuedDeviceToken,
+        subscribedDevices: cloud.getUserPushSubscriptionCount(uid || undefined, result.deviceId)
+      });
+    }
+  );
+
+  app.post('/api/push/unsubscribe', resolvePushCaller, (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const endpoint = typeof req.body?.endpoint === 'string' ? req.body.endpoint : '';
+    const authKey = typeof req.body?.authKey === 'string' ? req.body.authKey : '';
+    if (!authReq.authUid && !authReq.verifiedDeviceId && !authKey) {
+      res.status(401).json({ error: 'Device push token or session required.' });
+      return;
+    }
+    const removed = cloud.removePushSubscription({
+      uid: authReq.authUid,
+      deviceId: authReq.verifiedDeviceId,
+      endpoint,
+      authKey: authKey || undefined
+    });
+    res.json({ ok: true, removed });
+  });
+
+  app.get('/api/push/pending', resolvePushCaller, (req, res) => {
+    const authReq = req as AuthenticatedRequest;
+    const uid = authReq.authUid || '';
+    const deviceId = authReq.verifiedDeviceId || '';
+    if (!uid && !deviceId) {
+      res.status(401).json({ error: 'Device push token or session required.' });
+      return;
+    }
+    const sinceMs = Number(req.query.since) || 0;
+    const events = cloud.getPendingPushEvents({
+      uid: uid || undefined,
+      deviceId: deviceId || undefined,
+      sinceMs
+    });
+    res.json({ ok: true, events, serverTime: Date.now() });
+  });
+
+  app.post(
+    '/api/push/notify',
+    applyPushRateLimit('push-notify', 60),
+    resolvePushCaller,
+    async (req, res) => {
+      const authReq = req as AuthenticatedRequest;
+      const callerUid = authReq.authUid || '';
+      const callerDeviceId = authReq.verifiedDeviceId || '';
+
+      if (!callerUid && !callerDeviceId) {
+        res.status(401).json({
+          error: 'Enable push notifications on this device (device token) or sign in first.'
+        });
+        return;
+      }
+
+      let isCallerAdmin = Boolean(authReq.authIsAdmin);
+      if (!isCallerAdmin && callerUid) {
+        const authHeader = req.headers.authorization || '';
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+        const adminCheck = await cloud.verifyFirebaseAdminToken(token);
+        isCallerAdmin = Boolean(adminCheck.authorized);
+      }
+
+      const b = (req.body || {}) as {
+        title?: unknown;
+        body?: unknown;
+        url?: unknown;
+        tag?: unknown;
+        action?: unknown;
+        orderId?: unknown;
+        requireInteraction?: unknown;
+        delaySeconds?: unknown;
+        targetUids?: unknown[];
+        targetRoles?: unknown[];
+        targetDeviceIds?: unknown[];
+        eventType?: unknown;
+        actions?: Array<{ action?: string; title?: string }>;
+      };
+
+      const title =
+        typeof b.title === 'string' && b.title.trim()
+          ? b.title.trim().slice(0, 120)
+          : 'FreshVeggie Delivery';
+      const msgBody = typeof b.body === 'string' ? b.body.trim().slice(0, 300) : '';
+      if (!msgBody) {
+        res.status(400).json({ error: 'Notification message body is required.' });
+        return;
+      }
+
+      const requestedUids = Array.isArray(b.targetUids)
+        ? b.targetUids.filter((u): u is string => typeof u === 'string').slice(0, 50)
+        : [];
+      const requestedRoles = Array.isArray(b.targetRoles)
+        ? b.targetRoles.filter(
+            (r): r is 'customer' | 'delivery' | 'admin' =>
+              r === 'customer' || r === 'delivery' || r === 'admin'
+          )
+        : [];
+      const requestedDeviceIds = Array.isArray(b.targetDeviceIds)
+        ? b.targetDeviceIds.filter((d): d is string => typeof d === 'string').slice(0, 50)
+        : [];
+
+      let allowedUids: string[] = [];
+      let allowedRoles: Array<'customer' | 'delivery' | 'admin'> = [];
+      let allowedDeviceIds: string[] = [];
+
+      if (isCallerAdmin) {
+        allowedUids = requestedUids;
+        allowedRoles = requestedRoles;
+        allowedDeviceIds = requestedDeviceIds;
+      } else if (callerUid) {
+        const eventType = typeof b.eventType === 'string' ? b.eventType : 'self';
+        if (eventType === 'order_placed') {
+          allowedRoles = requestedRoles.filter((r) => r === 'admin' || r === 'delivery');
+          allowedUids = [callerUid];
+          if (callerDeviceId) allowedDeviceIds = [callerDeviceId];
+        } else if (eventType === 'order_update' || eventType === 'support_ticket') {
+          allowedRoles = requestedRoles.filter((r) => r === 'admin');
+          allowedUids = requestedUids.slice(0, 3);
+        } else {
+          allowedUids = [callerUid];
+          if (callerDeviceId) allowedDeviceIds = [callerDeviceId];
+        }
+      } else {
+        // Tokenless background/device-scoped caller: strictly scoped to the verified caller device itself
+        allowedDeviceIds = callerDeviceId ? [callerDeviceId] : [];
+      }
+
+      const safeActions = Array.isArray(b.actions)
+        ? b.actions
+            .filter(
+              (a): a is { action: string; title: string } =>
+                typeof a?.action === 'string' && typeof a?.title === 'string'
+            )
+            .map((a) => ({ action: a.action.slice(0, 40), title: a.title.slice(0, 40) }))
+            .slice(0, 2)
+        : undefined;
+
+      const safeUrl =
+        typeof b.url === 'string' && b.url.startsWith('/') && !b.url.startsWith('//')
+          ? b.url
+          : '/';
+      const delaySeconds = Math.max(0, Math.min(30, Math.round(Number(b.delaySeconds) || 0)));
+
+      const dispatchPayload = {
+        targetUids: allowedUids,
+        targetRoles: allowedRoles,
+        targetDeviceIds: allowedDeviceIds,
+        excludeUid:
+          !isCallerAdmin &&
+          callerUid &&
+          allowedRoles.length > 0 &&
+          !allowedUids.includes(callerUid)
+            ? callerUid
+            : undefined,
+        title,
+        body: msgBody,
+        url: safeUrl,
+        tag: typeof b.tag === 'string' ? b.tag : undefined,
+        action: typeof b.action === 'string' ? b.action : undefined,
+        orderId: typeof b.orderId === 'string' ? b.orderId : undefined,
+        requireInteraction: Boolean(b.requireInteraction),
+        actions: safeActions
+      };
+
+      if (delaySeconds > 0) {
+        const timer = setTimeout(() => {
+          void cloud.sendWebPush(dispatchPayload);
+        }, delaySeconds * 1000);
+        if (typeof timer.unref === 'function') {
+          timer.unref();
+        }
+        res.status(202).json({ ok: true, scheduled: true, delaySeconds });
+        return;
+      }
+
+      const result = await cloud.sendWebPush(dispatchPayload);
+      res.json({ ok: true, ...result });
+    }
+  );
+
   app.get('/api/analytics/summary', (_req, res) => {
     res.setHeader('Cache-Control', 'public, max-age=15, stale-while-revalidate=45');
     const now = Date.now();
@@ -774,6 +1264,14 @@ async function startServer() {
   });
 
   if (!isProduction) {
+    // Serve a clean lightweight SW in dev preview that imports our cross-platform push handler
+    app.get('/sw.js', (_req, res) => {
+      res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store');
+      res.send(
+        "importScripts('/push-sw.js');\nself.addEventListener('install', () => self.skipWaiting());\nself.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));\n"
+      );
+    });
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: {

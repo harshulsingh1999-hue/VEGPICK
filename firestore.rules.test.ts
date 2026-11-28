@@ -147,5 +147,14 @@ export const DIRTY_DOZEN_TESTS: DirtyDozenCase[] = [
     actor: 'phoneCustomerA',
     payload: { id: 'phoneCustomerA', uid: 'phoneCustomerA', name: 'Phone User', phone: '919876543210', email: '', addresses: [], isBlocked: false, joinedDate: '2026-11-13' },
     expected: 'ALLOW'
+  },
+  {
+    id: 16,
+    name: 'Non-admin creating fake delivery slot schedule',
+    collection: 'deliverySlots/slot_fake',
+    operation: 'create',
+    actor: 'customerA',
+    payload: { id: 'slot_fake', scheduleType: 'daily', slotDate: '', startTime: '08:00', endTime: '10:00', label: '8 AM - 10 AM', isActive: true, maxOrders: 0, cutoffMinutes: 30, sortOrder: 1 },
+    expected: 'PERMISSION_DENIED'
   }
 ];

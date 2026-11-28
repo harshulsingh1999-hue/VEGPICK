@@ -107,9 +107,13 @@ export default defineConfig(() => {
       })
     ],
     resolve: {
+      dedupe: ['react', 'react-dom', 'react-router-dom'],
       alias: {
         '@': path.resolve(__dirname, '.'),
       },
+    },
+    optimizeDeps: {
+      include: ['react', 'react-dom', 'react-router-dom', 'lucide-react'],
     },
     build: {
       rollupOptions: {

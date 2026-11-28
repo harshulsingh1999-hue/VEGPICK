@@ -460,10 +460,14 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       status === 'delivered' &&
       targetOrder.paymentMethod === 'cod' &&
       targetOrder.paymentStatus !== 'collected';
-    const [feedSnap, activeSnap] = await Promise.all([
+    const deterministicLedgerId = `trip_${orderId}`;
+    const [feedSnap, activeSnap, existingLedgerSnap] = await Promise.all([
       getDoc(doc(db, 'dispatchFeed', orderId)).catch(() => null),
       status === 'delivered' || status === 'cancelled'
         ? getDoc(doc(db, 'active_deliveries', orderId)).catch(() => null)
+        : Promise.resolve(null),
+      status === 'delivered'
+        ? getDoc(doc(db, 'walletLedger', deterministicLedgerId)).catch(() => null)
         : Promise.resolve(null)
     ]);
     const feedData = feedSnap?.exists() ? (feedSnap.data() as Partial<DispatchFeedItem>) : null;
@@ -498,10 +502,11 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         });
       }
 
-      const deterministicLedgerId = `trip_${orderId}`;
-      const alreadyCredited = walletLedger.some(
-        (entry) => entry.id === deterministicLedgerId || (entry.orderId === orderId && entry.type === 'trip_credit')
-      );
+      const alreadyCredited =
+        Boolean(existingLedgerSnap?.exists()) ||
+        walletLedger.some(
+          (entry) => entry.id === deterministicLedgerId || (entry.orderId === orderId && entry.type === 'trip_credit')
+        );
 
       if (status === 'delivered') {
         batch.update(doc(db, 'deliveryPartners', firebaseUser.uid), {

@@ -8,8 +8,8 @@ import {
   Download, Upload, Monitor, Camera, Database, Server, Calendar, Clock, Landmark, Smartphone,
   ChevronLeft, ChevronRight, Wrench
 } from 'lucide-react';
-import { format } from 'date-fns';
-import { useAuth } from '../../context/AuthContext';
+import { format, subDays } from 'date-fns';
+import { useAuth, PreviewOrderDeletionResult } from '../../context/AuthContext';
 import { useStore } from '../../context/StoreContext';
 import { useDelivery } from '../../context/DeliveryContext';
 import {
@@ -30,6 +30,7 @@ import { AreaPincodeControlCenter } from '../../components/admin/AreaPincodeCont
 import { DatabaseControlCenter } from '../../components/admin/DatabaseControlCenter';
 import { ServerApiControlCenter } from '../../components/admin/ServerApiControlCenter';
 import { CleanupDiagnosticsControlCenter } from '../../components/admin/CleanupDiagnosticsControlCenter';
+import { DeliverySlotControlCenter } from '../../components/admin/DeliverySlotControlCenter';
 import { AppLogo } from '../../components/AppLogo';
 
 const SLOT_TIME_WINDOWS = [
@@ -52,6 +53,7 @@ const TABS = [
   { id: 'databases', label: 'Database Control', icon: Database },
   { id: 'servers', label: 'Server & API Control', icon: Server },
   { id: 'cleanup_diagnostics', label: 'CleanUp & App Diagnosis', icon: Wrench },
+  { id: 'delivery_slots', label: 'Delivery Slot Schedule', icon: Clock },
   { id: 'customers', label: 'Customer Management', icon: Users },
   { id: 'delivery', label: 'Delivery Men Management', icon: Truck },
   { id: 'orders', label: 'Order Management', icon: ShoppingCart },
@@ -87,6 +89,8 @@ export const AdminDashboard = () => {
     updateOrderStatus,
     updateOrderDetails,
     assignOrderToDelivery,
+    previewOrdersForDateDeletion,
+    deleteOrdersManually,
     adminList,
     grantAdminAccess,
     revokeAdminAccess
@@ -106,6 +110,7 @@ export const AdminDashboard = () => {
     complaints,
     updateComplaintStatus,
     serviceAreas,
+    deliverySlots,
     checkPincodeServiceability,
     appSettings,
     updateAppSettings
@@ -283,11 +288,29 @@ export const AdminDashboard = () => {
   // Orders filters, bulk selection & modals
   const [orderStatusFilter, setOrderStatusFilter] = useState('All');
   const [orderSearch, setOrderSearch] = useState('');
+  const [orderDateFilter, setOrderDateFilter] = useState('');
   const [viewingOrderId, setViewingOrderId] = useState<string | null>(null);
   const [selectedOrderIds, setSelectedOrderIds] = useState<string[]>([]);
   const [bulkDriverUid, setBulkDriverUid] = useState('');
   const [bulkBusy, setBulkBusy] = useState(false);
   const viewingOrder = allOrders.find((o) => o.id === viewingOrderId) || null;
+
+  // Strictly Manual Order History Deletion Modals (zero automatic delete timers)
+  const [showDateDeleteModal, setShowDateDeleteModal] = useState(false);
+  const [deleteDateMode, setDeleteDateMode] = useState<'single' | 'range'>('single');
+  const [deleteStartDate, setDeleteStartDate] = useState(format(subDays(new Date(), 1), 'yyyy-MM-dd'));
+  const [deleteEndDate, setDeleteEndDate] = useState(format(subDays(new Date(), 1), 'yyyy-MM-dd'));
+  const [deleteIncludeActive, setDeleteIncludeActive] = useState(false);
+  const [deleteLedgerToo, setDeleteLedgerToo] = useState(false);
+  const [deletePhotosToo, setDeletePhotosToo] = useState(true);
+  const [deletePreviewResult, setDeletePreviewResult] = useState<PreviewOrderDeletionResult | null>(null);
+  const [previewingDeletion, setPreviewingDeletion] = useState(false);
+  const [executingDeletion, setExecutingDeletion] = useState(false);
+
+  const [manualDeleteOrdersTarget, setManualDeleteOrdersTarget] = useState<Order[] | null>(null);
+  const [manualDeleteTargetLedger, setManualDeleteTargetLedger] = useState(false);
+  const [manualDeleteTargetPhotos, setManualDeleteTargetPhotos] = useState(true);
+  const [manualDeleteTargetBusy, setManualDeleteTargetBusy] = useState(false);
 
   const [editingOrder, setEditingOrder] = useState<Order | null>(null);
   const [savingOrderEdit, setSavingOrderEdit] = useState(false);
@@ -323,6 +346,13 @@ export const AdminDashboard = () => {
     let initialSlotDate = localDateIso;
     let matchedWindow = '__custom__';
 
+    const candidateWindows = Array.from(
+      new Set([
+        ...deliverySlots.map((s) => s.label),
+        ...SLOT_TIME_WINDOWS
+      ])
+    );
+
     if (sepIndex !== -1) {
       const datePart = rawSlot.slice(0, sepIndex).trim();
       const windowPart = rawSlot.slice(sepIndex + 3).trim();
@@ -331,10 +361,10 @@ export const AdminDashboard = () => {
       if (!Number.isNaN(parsedSlotDate.getTime())) {
         initialSlotDate = format(parsedSlotDate, 'yyyy-MM-dd');
       }
-      if (SLOT_TIME_WINDOWS.includes(windowPart)) {
+      if (candidateWindows.includes(windowPart)) {
         matchedWindow = windowPart;
       }
-    } else if (SLOT_TIME_WINDOWS.includes(rawSlot)) {
+    } else if (candidateWindows.includes(rawSlot)) {
       matchedWindow = rawSlot;
     }
 
@@ -963,6 +993,12 @@ export const AdminDashboard = () => {
         const qTerm = orderSearch.trim().toLowerCase();
         const filteredOrdersList = allOrders.filter(o => {
           const matchesStatus = orderStatusFilter === 'All' || o.status === orderStatusFilter;
+          let matchesDateFilter = true;
+          if (orderDateFilter) {
+            const parsed = o.date ? new Date(o.date) : null;
+            const localIso = parsed && !Number.isNaN(parsed.getTime()) ? format(parsed, 'yyyy-MM-dd') : '';
+            matchesDateFilter = localIso === orderDateFilter;
+          }
           const matchesSearch =
             !qTerm ||
             o.id.toLowerCase().includes(qTerm) ||
@@ -973,25 +1009,60 @@ export const AdminDashboard = () => {
             (o.address?.zip && o.address.zip.toLowerCase().includes(qTerm)) ||
             (o.deliverySlot && o.deliverySlot.toLowerCase().includes(qTerm)) ||
             formatOrderDateTime(o.date).toLowerCase().includes(qTerm);
-          return matchesStatus && matchesSearch;
+          return matchesStatus && matchesDateFilter && matchesSearch;
         });
 
         return (
           <div className="space-y-6 animate-in fade-in">
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+            <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
               <div>
                 <h2 className="text-2xl font-bold text-gray-800">Order Management</h2>
-                <p className="text-sm text-gray-500">Track all customer orders, assign to delivery boys, and advance statuses.</p>
+                <p className="text-sm text-gray-500">Track orders, assign delivery partners, edit details, or manually clear history by date.</p>
               </div>
 
-              <div className="flex gap-2 w-full sm:w-auto">
+              <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto">
                 <input
                   type="text"
                   placeholder="Search #, customer, phone, address, slot..."
                   value={orderSearch}
                   onChange={e => setOrderSearch(e.target.value)}
-                  className="px-3 py-2 bg-white border border-gray-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500 w-full sm:w-72"
+                  className="px-3 py-2 bg-white border border-gray-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500 flex-1 min-w-[210px] sm:w-64"
                 />
+                <div className="flex items-center gap-1 bg-white border border-gray-200 rounded-xl px-2.5 py-1.5">
+                  <Calendar size={14} className="text-blue-600" />
+                  <input
+                    type="date"
+                    aria-label="Filter orders by date"
+                    value={orderDateFilter}
+                    onChange={(e) => setOrderDateFilter(e.target.value)}
+                    className="text-xs font-semibold text-gray-700 outline-none bg-transparent"
+                  />
+                  {orderDateFilter && (
+                    <button
+                      type="button"
+                      onClick={() => setOrderDateFilter('')}
+                      className="text-gray-400 hover:text-gray-700"
+                      title="Clear date filter"
+                    >
+                      <X size={13} />
+                    </button>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (orderDateFilter) {
+                      setDeleteStartDate(orderDateFilter);
+                      setDeleteEndDate(orderDateFilter);
+                      setDeleteDateMode('single');
+                    }
+                    setDeletePreviewResult(null);
+                    setShowDateDeleteModal(true);
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-red-50 border border-red-200 hover:bg-red-100 text-red-700 text-xs font-bold inline-flex items-center gap-1.5 transition"
+                >
+                  <Trash2 size={14} /> Manual Date-Wise Delete
+                </button>
               </div>
             </div>
 
@@ -1141,6 +1212,20 @@ export const AdminDashboard = () => {
                   </button>
                   <button
                     type="button"
+                    onClick={() => {
+                      const picked = allOrders.filter((o) => selectedOrderIds.includes(o.id));
+                      if (picked.length > 0) {
+                        setManualDeleteTargetLedger(false);
+                        setManualDeleteTargetPhotos(true);
+                        setManualDeleteOrdersTarget(picked);
+                      }
+                    }}
+                    className="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-lg text-xs font-bold inline-flex items-center gap-1 transition"
+                  >
+                    <Trash2 size={12} /> Delete Selected
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => setSelectedOrderIds([])}
                     className="text-xs font-bold text-gray-500 hover:text-gray-800 px-2"
                   >
@@ -1227,13 +1312,27 @@ export const AdminDashboard = () => {
                             >
                               <Eye size={13} /> {order.items?.length || 0} items &amp; bill
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => openEditOrderModal(order)}
-                              className="inline-flex items-center gap-1 text-[11px] font-bold text-gray-700 bg-gray-100 hover:bg-blue-50 hover:text-blue-700 border border-gray-200 hover:border-blue-200 px-2 py-1 rounded-lg transition"
-                            >
-                              <Edit2 size={11} /> Edit Details
-                            </button>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => openEditOrderModal(order)}
+                                className="inline-flex items-center gap-1 text-[11px] font-bold text-gray-700 bg-gray-100 hover:bg-blue-50 hover:text-blue-700 border border-gray-200 hover:border-blue-200 px-2 py-1 rounded-lg transition"
+                              >
+                                <Edit2 size={11} /> Edit Details
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setManualDeleteTargetLedger(false);
+                                  setManualDeleteTargetPhotos(true);
+                                  setManualDeleteOrdersTarget([order]);
+                                }}
+                                className="inline-flex items-center gap-1 text-[11px] font-bold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 px-2 py-1 rounded-lg transition"
+                                title="Manually delete this order & its history data"
+                              >
+                                <Trash2 size={11} /> Delete
+                              </button>
+                            </div>
                           </div>
                         </td>
 
@@ -1841,8 +1940,15 @@ export const AdminDashboard = () => {
                   <label className="block text-xs font-bold text-gray-600 mb-1">Base Delivery Fee (₹)</label>
                   <input
                     type="number"
+                    min={0}
+                    max={5000}
                     value={settingsForm.baseDeliveryFee}
-                    onChange={e => setSettingsForm({ ...settingsForm, baseDeliveryFee: Number(e.target.value) })}
+                    onChange={e =>
+                      setSettingsForm({
+                        ...settingsForm,
+                        baseDeliveryFee: Math.max(0, Math.min(5000, Number(e.target.value) || 0))
+                      })
+                    }
                     className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-blue-500"
                   />
                   <span className="text-[11px] text-gray-400">Charged on orders below free threshold</span>
@@ -1852,8 +1958,15 @@ export const AdminDashboard = () => {
                   <label className="block text-xs font-bold text-gray-600 mb-1">Free Delivery Minimum (₹)</label>
                   <input
                     type="number"
+                    min={0}
+                    max={50000}
                     value={settingsForm.freeDeliveryThreshold}
-                    onChange={e => setSettingsForm({ ...settingsForm, freeDeliveryThreshold: Number(e.target.value) })}
+                    onChange={e =>
+                      setSettingsForm({
+                        ...settingsForm,
+                        freeDeliveryThreshold: Math.max(0, Math.min(50000, Number(e.target.value) || 0))
+                      })
+                    }
                     className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-blue-500"
                   />
                   <span className="text-[11px] text-gray-400">Orders above this qualify for free shipping</span>
@@ -2311,7 +2424,12 @@ export const AdminDashboard = () => {
                   min={0}
                   max={50}
                   value={settingsForm.taxRate}
-                  onChange={e => setSettingsForm({ ...settingsForm, taxRate: Number(e.target.value) })}
+                  onChange={e =>
+                    setSettingsForm({
+                      ...settingsForm,
+                      taxRate: Math.max(0, Math.min(50, Number(e.target.value) || 0))
+                    })
+                  }
                   className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl font-bold text-gray-800 outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
@@ -2323,7 +2441,12 @@ export const AdminDashboard = () => {
                   min={0}
                   max={5000}
                   value={settingsForm.baseDeliveryFee}
-                  onChange={e => setSettingsForm({ ...settingsForm, baseDeliveryFee: Number(e.target.value) })}
+                  onChange={e =>
+                    setSettingsForm({
+                      ...settingsForm,
+                      baseDeliveryFee: Math.max(0, Math.min(5000, Number(e.target.value) || 0))
+                    })
+                  }
                   className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl font-bold text-gray-800 outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
@@ -2335,7 +2458,12 @@ export const AdminDashboard = () => {
                   min={0}
                   max={50000}
                   value={settingsForm.freeDeliveryThreshold}
-                  onChange={e => setSettingsForm({ ...settingsForm, freeDeliveryThreshold: Number(e.target.value) })}
+                  onChange={e =>
+                    setSettingsForm({
+                      ...settingsForm,
+                      freeDeliveryThreshold: Math.max(0, Math.min(50000, Number(e.target.value) || 0))
+                    })
+                  }
                   className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl font-bold text-gray-800 outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
@@ -2484,6 +2612,9 @@ export const AdminDashboard = () => {
 
       case 'cleanup_diagnostics':
         return <CleanupDiagnosticsControlCenter />;
+
+      case 'delivery_slots':
+        return <DeliverySlotControlCenter onExportCsv={downloadCsv} />;
 
       default:
         return null;
@@ -3660,7 +3791,19 @@ export const AdminDashboard = () => {
                       onChange={e => setEditOrderForm({ ...editOrderForm, slotWindow: e.target.value })}
                       className="w-full p-2 bg-white border border-blue-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
                     >
-                      {SLOT_TIME_WINDOWS.map((win) => (
+                      {Array.from(
+                        new Set([
+                          ...deliverySlots
+                            .filter(
+                              (s) =>
+                                s.isActive &&
+                                (s.scheduleType === 'daily' ||
+                                  (editOrderForm.slotDate && s.slotDate === editOrderForm.slotDate))
+                            )
+                            .map((s) => s.label),
+                          ...SLOT_TIME_WINDOWS
+                        ])
+                      ).map((win) => (
                         <option key={win} value={win}>
                           {win}
                         </option>
@@ -3849,6 +3992,425 @@ export const AdminDashboard = () => {
               {allOrders.filter(o => o.userId === selectedCustomer.id).length === 0 && (
                 <p className="text-xs text-gray-400">No orders placed yet.</p>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ----------------------------------------------------------------- */}
+      {/* Manual Date-Wise Delete Order History & History Data Modal        */}
+      {/* (Strictly Manual — Zero Auto-Delete Rules or Background Timers)   */}
+      {/* ----------------------------------------------------------------- */}
+      {showDateDeleteModal && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-xl overflow-hidden shadow-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-start border-b pb-3 gap-3">
+              <div>
+                <h3 className="font-bold text-lg text-gray-900 flex items-center gap-2">
+                  <Trash2 size={18} className="text-red-600" />
+                  Manual Date-Wise Delete Order History
+                </h3>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  100% Manual Deletion — Automatic deletion is disabled. Preview matching records before permanently deleting order history across Firestore, dispatch queues, SQLite WAL, and Supabase archives.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={executingDeletion}
+                onClick={() => setShowDateDeleteModal(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Mode Selector */}
+            <div className="grid grid-cols-2 gap-2 bg-gray-100 p-1 rounded-xl">
+              <button
+                type="button"
+                onClick={() => {
+                  setDeleteDateMode('single');
+                  setDeletePreviewResult(null);
+                }}
+                className={`py-2 rounded-lg text-xs font-bold transition ${
+                  deleteDateMode === 'single' ? 'bg-white text-gray-900 shadow-xs' : 'text-gray-500'
+                }`}
+              >
+                Single Date
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setDeleteDateMode('range');
+                  setDeletePreviewResult(null);
+                }}
+                className={`py-2 rounded-lg text-xs font-bold transition ${
+                  deleteDateMode === 'range' ? 'bg-white text-gray-900 shadow-xs' : 'text-gray-500'
+                }`}
+              >
+                Date Range (From – To)
+              </button>
+            </div>
+
+            {/* Date Pickers + Quick Presets */}
+            <div className="space-y-3 bg-gray-50 p-3.5 rounded-xl border border-gray-200">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-bold text-gray-600">Select Order Date(s)</span>
+                <div className="flex gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const today = format(new Date(), 'yyyy-MM-dd');
+                      setDeleteStartDate(today);
+                      setDeleteEndDate(today);
+                      setDeletePreviewResult(null);
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-white border border-gray-200 text-[11px] font-bold text-gray-700 hover:bg-gray-100"
+                  >
+                    Today
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const yest = format(subDays(new Date(), 1), 'yyyy-MM-dd');
+                      setDeleteStartDate(yest);
+                      setDeleteEndDate(yest);
+                      setDeletePreviewResult(null);
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-white border border-gray-200 text-[11px] font-bold text-gray-700 hover:bg-gray-100"
+                  >
+                    Yesterday
+                  </button>
+                </div>
+              </div>
+
+              <div className={`grid ${deleteDateMode === 'range' ? 'grid-cols-2' : 'grid-cols-1'} gap-3`}>
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-600 mb-1">
+                    {deleteDateMode === 'single' ? 'Order Date *' : 'From Date *'}
+                  </label>
+                  <input
+                    type="date"
+                    value={deleteStartDate}
+                    onChange={(e) => {
+                      setDeleteStartDate(e.target.value);
+                      if (deleteDateMode === 'single') {
+                        setDeleteEndDate(e.target.value);
+                      }
+                      setDeletePreviewResult(null);
+                    }}
+                    className="w-full p-2.5 bg-white border border-gray-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-red-500"
+                  />
+                </div>
+                {deleteDateMode === 'range' && (
+                  <div>
+                    <label className="block text-[11px] font-bold text-gray-600 mb-1">To Date *</label>
+                    <input
+                      type="date"
+                      value={deleteEndDate}
+                      onChange={(e) => {
+                        setDeleteEndDate(e.target.value);
+                        setDeletePreviewResult(null);
+                      }}
+                      className="w-full p-2.5 bg-white border border-gray-200 rounded-xl text-sm outline-none focus:ring-2 focus:ring-red-500"
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Scope & Cleanup Options */}
+            <div className="space-y-2.5 text-xs">
+              <label className="flex items-start gap-2.5 p-2.5 rounded-xl border border-gray-200 bg-white cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={deleteIncludeActive}
+                  onChange={(e) => {
+                    setDeleteIncludeActive(e.target.checked);
+                    setDeletePreviewResult(null);
+                  }}
+                  className="mt-0.5 rounded border-gray-300 text-red-600 focus:ring-red-500"
+                />
+                <div>
+                  <span className="font-bold text-gray-800 block">
+                    Include Non-Completed / Active Orders (placed, packed, out for delivery)
+                  </span>
+                  <span className="text-gray-500">
+                    When unchecked, only completed history orders (<strong>delivered</strong> &amp; <strong>cancelled</strong>) are matched.
+                  </span>
+                </div>
+              </label>
+
+              <label className="flex items-start gap-2.5 p-2.5 rounded-xl border border-gray-200 bg-white cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={deleteLedgerToo}
+                  onChange={(e) => setDeleteLedgerToo(e.target.checked)}
+                  className="mt-0.5 rounded border-gray-300 text-red-600 focus:ring-red-500"
+                />
+                <div>
+                  <span className="font-bold text-gray-800 block">
+                    Also Delete Linked Rider Wallet Ledger Entries (Firestore + SQL Archive)
+                  </span>
+                  <span className="text-gray-500">
+                    Removes payout/trip credit rows tied to these orders. Leave unchecked if preserving driver accounting statements.
+                  </span>
+                </div>
+              </label>
+
+              <label className="flex items-start gap-2.5 p-2.5 rounded-xl border border-gray-200 bg-white cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={deletePhotosToo}
+                  onChange={(e) => setDeletePhotosToo(e.target.checked)}
+                  className="mt-0.5 rounded border-gray-300 text-red-600 focus:ring-red-500"
+                />
+                <div>
+                  <span className="font-bold text-gray-800 block">
+                    Delete Uploaded Delivery Proof Photos on Server Disk
+                  </span>
+                  <span className="text-gray-500">
+                    Frees disk storage used by locally uploaded delivery proof snapshots for these deleted orders.
+                  </span>
+                </div>
+              </label>
+            </div>
+
+            {/* Step 1: Preview Matching Orders */}
+            <div className="flex gap-2">
+              <button
+                type="button"
+                disabled={previewingDeletion || executingDeletion}
+                onClick={async () => {
+                  if (!deleteStartDate) {
+                    showToast('Please select a date first.', 'error');
+                    return;
+                  }
+                  const effectiveEnd = deleteDateMode === 'single' ? deleteStartDate : deleteEndDate;
+                  if (!effectiveEnd || effectiveEnd < deleteStartDate) {
+                    showToast('End Date must be on or after Start Date.', 'error');
+                    return;
+                  }
+                  setPreviewingDeletion(true);
+                  try {
+                    const res = await previewOrdersForDateDeletion({
+                      mode: deleteDateMode,
+                      startDate: deleteStartDate,
+                      endDate: effectiveEnd,
+                      includeActiveOrders: deleteIncludeActive
+                    });
+                    setDeletePreviewResult(res);
+                  } catch (err) {
+                    showToast(
+                      err instanceof Error ? err.message : 'Unable to scan orders for date.',
+                      'error'
+                    );
+                  } finally {
+                    setPreviewingDeletion(false);
+                  }
+                }}
+                className="flex-1 py-2.5 rounded-xl bg-gray-900 hover:bg-gray-800 disabled:opacity-50 text-white text-xs font-bold transition"
+              >
+                {previewingDeletion ? 'Scanning Orders & Archives...' : 'Step 1: Preview Matching Order History'}
+              </button>
+            </div>
+
+            {/* Preview Results Card */}
+            {deletePreviewResult && (
+              <div className="rounded-xl border border-red-200 bg-red-50/50 p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-extrabold text-gray-900">
+                      {deletePreviewResult.totalCount} Order(s) Matched ({formatCurrency(deletePreviewResult.totalAmount)})
+                    </p>
+                    <p className="text-[11px] text-gray-600">
+                      Delivered: {deletePreviewResult.deliveredCount} • Cancelled: {deletePreviewResult.cancelledCount} • Active: {deletePreviewResult.activeCount}
+                    </p>
+                  </div>
+                </div>
+
+                {deletePreviewResult.totalCount === 0 ? (
+                  <p className="text-xs text-gray-600">
+                    No matching orders found for the selected date filter.
+                  </p>
+                ) : (
+                  <div className="max-h-36 overflow-y-auto space-y-1.5 border border-red-100 rounded-lg bg-white p-2">
+                    {deletePreviewResult.orders.slice(0, 50).map((ord) => (
+                      <div
+                        key={ord.id}
+                        className="flex items-center justify-between text-[11px] border-b border-gray-50 pb-1 last:border-b-0 last:pb-0"
+                      >
+                        <div className="min-w-0">
+                          <span className="font-bold text-gray-800">#{ord.id}</span>{' '}
+                          <span className="text-gray-500">({ord.customerName})</span>
+                          <span className="block text-[10px] text-gray-400">
+                            {formatOrderDateTime(ord.date)} • {ord.status.replace(/_/g, ' ').toUpperCase()}
+                          </span>
+                        </div>
+                        <span className="font-bold text-gray-800 shrink-0">
+                          {formatCurrency(ord.total)}
+                        </span>
+                      </div>
+                    ))}
+                    {deletePreviewResult.orders.length > 50 && (
+                      <p className="text-[11px] text-center text-gray-500 pt-1">
+                        + {deletePreviewResult.orders.length - 50} additional matched order(s)
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {deletePreviewResult.totalCount > 0 && (
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      type="button"
+                      disabled={executingDeletion}
+                      onClick={() => setShowDateDeleteModal(false)}
+                      className="flex-1 py-2.5 bg-white border border-gray-200 rounded-xl text-xs font-bold text-gray-700 hover:bg-gray-50"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      disabled={executingDeletion}
+                      onClick={async () => {
+                        setExecutingDeletion(true);
+                        try {
+                          const outcome = await deleteOrdersManually({
+                            ordersToDelete: deletePreviewResult.orders,
+                            deleteLedgerEntries: deleteLedgerToo,
+                            deleteProofPhotos: deletePhotosToo
+                          });
+                          const deletedSet = new Set(deletePreviewResult.orders.map((o) => o.id));
+                          setSelectedOrderIds((prev) => prev.filter((id) => !deletedSet.has(id)));
+                          showToast(
+                            `Manually deleted ${outcome.deletedOrdersCount} orders (${outcome.sqliteDeletedRows} SQLite / ${outcome.supabaseDeletedRows} Supabase archive rows, ${outcome.deletedLedgerCount} ledger rows, ${outcome.deletedProofFilesCount} proof photos).`,
+                            'success'
+                          );
+                          setShowDateDeleteModal(false);
+                          setDeletePreviewResult(null);
+                        } catch (err) {
+                          showToast(
+                            err instanceof Error ? err.message : 'Manual order deletion failed.',
+                            'error'
+                          );
+                        } finally {
+                          setExecutingDeletion(false);
+                        }
+                      }}
+                      className="flex-1 py-2.5 bg-red-600 hover:bg-red-700 disabled:opacity-60 text-white rounded-xl text-xs font-bold"
+                    >
+                      {executingDeletion
+                        ? 'Deleting Permanently...'
+                        : `Permanently Delete ${deletePreviewResult.totalCount} Order(s)`}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ----------------------------------------------------------------- */}
+      {/* Manual Selected / Single Order Deletion Confirmation Modal        */}
+      {/* ----------------------------------------------------------------- */}
+      {manualDeleteOrdersTarget && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl p-6 space-y-4">
+            <div className="flex justify-between items-start gap-2">
+              <div>
+                <h3 className="font-bold text-lg text-gray-900">
+                  Manually Delete {manualDeleteOrdersTarget.length === 1
+                    ? `Order #${manualDeleteOrdersTarget[0].id}`
+                    : `${manualDeleteOrdersTarget.length} Selected Orders`}?
+                </h3>
+                <p className="text-xs text-gray-500 mt-1">
+                  This permanently erases the selected order(s), dispatch queue records, and relational SQLite/Supabase history archive rows. This action is strictly manual and cannot be undone.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={manualDeleteTargetBusy}
+                onClick={() => setManualDeleteOrdersTarget(null)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="max-h-32 overflow-y-auto bg-gray-50 rounded-xl border border-gray-200 p-2.5 space-y-1 text-xs">
+              {manualDeleteOrdersTarget.map((o) => (
+                <div key={o.id} className="flex justify-between items-center">
+                  <span className="font-semibold text-gray-800">
+                    #{o.id} • {o.customerName}
+                  </span>
+                  <span className="font-bold text-gray-700">{formatCurrency(o.total)}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="space-y-2 text-xs">
+              <label className="flex items-center gap-2 text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={manualDeleteTargetLedger}
+                  onChange={(e) => setManualDeleteTargetLedger(e.target.checked)}
+                  className="rounded border-gray-300 text-red-600"
+                />
+                Also delete linked rider wallet ledger entries
+              </label>
+              <label className="flex items-center gap-2 text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={manualDeleteTargetPhotos}
+                  onChange={(e) => setManualDeleteTargetPhotos(e.target.checked)}
+                  className="rounded border-gray-300 text-red-600"
+                />
+                Delete uploaded delivery proof photos on server disk
+              </label>
+            </div>
+
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                disabled={manualDeleteTargetBusy}
+                onClick={() => setManualDeleteOrdersTarget(null)}
+                className="flex-1 py-2.5 border border-gray-200 rounded-xl text-sm font-bold text-gray-600 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={manualDeleteTargetBusy}
+                onClick={async () => {
+                  setManualDeleteTargetBusy(true);
+                  try {
+                    const outcome = await deleteOrdersManually({
+                      ordersToDelete: manualDeleteOrdersTarget,
+                      deleteLedgerEntries: manualDeleteTargetLedger,
+                      deleteProofPhotos: manualDeleteTargetPhotos
+                    });
+                    const deletedSet = new Set(manualDeleteOrdersTarget.map((o) => o.id));
+                    setSelectedOrderIds((prev) => prev.filter((id) => !deletedSet.has(id)));
+                    showToast(
+                      `Deleted ${outcome.deletedOrdersCount} order(s) & synced history archives`,
+                      'success'
+                    );
+                    setManualDeleteOrdersTarget(null);
+                  } catch (err) {
+                    showToast(
+                      err instanceof Error ? err.message : 'Unable to delete selected orders.',
+                      'error'
+                    );
+                  } finally {
+                    setManualDeleteTargetBusy(false);
+                  }
+                }}
+                className="flex-1 py-2.5 bg-red-600 hover:bg-red-700 disabled:opacity-60 text-white rounded-xl text-sm font-bold"
+              >
+                {manualDeleteTargetBusy ? 'Deleting...' : 'Permanently Delete'}
+              </button>
             </div>
           </div>
         </div>

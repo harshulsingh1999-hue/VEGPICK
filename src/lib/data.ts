@@ -161,6 +161,31 @@ export interface ServiceArea {
   notes?: string;
 }
 
+export interface DeliverySlot {
+  id: string;
+  scheduleType: 'date' | 'daily';
+  slotDate: string; // '' for daily template, 'YYYY-MM-DD' for date override
+  startTime: string; // 'HH:mm' (24h)
+  endTime: string; // 'HH:mm' (24h)
+  label: string;
+  isActive: boolean;
+  maxOrders: number; // 0 = unlimited
+  cutoffMinutes: number; // minutes before startTime when booking closes
+  sortOrder: number;
+  notes?: string;
+}
+
+export const DEFAULT_DAILY_SLOT_TEMPLATES: Array<Omit<DeliverySlot, 'id'>> = [
+  { scheduleType: 'daily', slotDate: '', startTime: '06:00', endTime: '08:00', label: '6:00 AM - 8:00 AM', isActive: true, maxOrders: 0, cutoffMinutes: 0, sortOrder: 1, notes: 'Early Morning Farm Harvest' },
+  { scheduleType: 'daily', slotDate: '', startTime: '08:00', endTime: '10:00', label: '8:00 AM - 10:00 AM', isActive: true, maxOrders: 0, cutoffMinutes: 0, sortOrder: 2, notes: 'Morning Slot' },
+  { scheduleType: 'daily', slotDate: '', startTime: '10:00', endTime: '12:00', label: '10:00 AM - 12:00 PM', isActive: true, maxOrders: 0, cutoffMinutes: 0, sortOrder: 3, notes: 'Late Morning Slot' },
+  { scheduleType: 'daily', slotDate: '', startTime: '16:00', endTime: '17:00', label: '4:00 PM - 5:00 PM', isActive: true, maxOrders: 0, cutoffMinutes: 0, sortOrder: 4, notes: 'Evening Slot 1' },
+  { scheduleType: 'daily', slotDate: '', startTime: '17:00', endTime: '18:00', label: '5:00 PM - 6:00 PM', isActive: true, maxOrders: 0, cutoffMinutes: 0, sortOrder: 5, notes: 'Evening Slot 2' },
+  { scheduleType: 'daily', slotDate: '', startTime: '18:00', endTime: '19:00', label: '6:00 PM - 7:00 PM', isActive: true, maxOrders: 0, cutoffMinutes: 0, sortOrder: 6, notes: 'Evening Peak Slot' },
+  { scheduleType: 'daily', slotDate: '', startTime: '19:00', endTime: '20:00', label: '7:00 PM - 8:00 PM', isActive: true, maxOrders: 0, cutoffMinutes: 0, sortOrder: 7, notes: 'Dinner Prep Slot' },
+  { scheduleType: 'daily', slotDate: '', startTime: '20:00', endTime: '21:00', label: '8:00 PM - 9:00 PM', isActive: true, maxOrders: 0, cutoffMinutes: 0, sortOrder: 8, notes: 'Night Last Dispatch' }
+];
+
 export interface AppSettings {
   taxRate: number;
   baseDeliveryFee: number;

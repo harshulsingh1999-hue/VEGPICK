@@ -35,7 +35,8 @@ import {
   handleFirestoreError,
   OperationType
 } from '../lib/firebase';
-import { archiveOrderAsync } from '../lib/apiClient';
+import { format } from 'date-fns';
+import { adminApiFetch, archiveOrderAsync } from '../lib/apiClient';
 import { Address, DispatchFeedItem, Order, User } from '../lib/data';
 
 export interface PlaceOrderInput {
@@ -66,6 +67,36 @@ export interface UpdateOrderDetailsInput {
   customerName?: string;
   customerPhone?: string;
   address?: Partial<Address>;
+}
+
+export interface PreviewOrderDeletionFilter {
+  mode: 'single' | 'range';
+  startDate: string; // 'YYYY-MM-DD'
+  endDate: string; // 'YYYY-MM-DD'
+  includeActiveOrders?: boolean;
+}
+
+export interface PreviewOrderDeletionResult {
+  orders: Order[];
+  totalCount: number;
+  deliveredCount: number;
+  cancelledCount: number;
+  activeCount: number;
+  totalAmount: number;
+}
+
+export interface DeleteOrdersManuallyOptions {
+  ordersToDelete: Order[];
+  deleteLedgerEntries?: boolean;
+  deleteProofPhotos?: boolean;
+}
+
+export interface DeleteOrdersManuallyResult {
+  deletedOrdersCount: number;
+  deletedLedgerCount: number;
+  deletedProofFilesCount: number;
+  sqliteDeletedRows: number;
+  supabaseDeletedRows: number;
 }
 
 export interface AdminAllowlistEntry {
@@ -119,6 +150,12 @@ interface AuthContextType {
     deliveryName: string,
     deliveryCode: string
   ) => Promise<void>;
+  previewOrdersForDateDeletion: (
+    filter: PreviewOrderDeletionFilter
+  ) => Promise<PreviewOrderDeletionResult>;
+  deleteOrdersManually: (
+    options: DeleteOrdersManuallyOptions
+  ) => Promise<DeleteOrdersManuallyResult>;
 
   // Customers & Admin Allowlist Management (Admin)
   allUsers: User[];
@@ -995,6 +1032,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     deliveryName: string,
     deliveryCode: string
   ): Promise<void> => {
+    if (!isAdmin || !firebaseUser) {
+      throw new Error('Only store administrators can assign delivery partners.');
+    }
     try {
       let currentOrder = allOrders.find((o) => o.id === orderId) || orders.find((o) => o.id === orderId);
       if (!currentOrder) {
@@ -1046,6 +1086,221 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const previewOrdersForDateDeletion = async (
+    filter: PreviewOrderDeletionFilter
+  ): Promise<PreviewOrderDeletionResult> => {
+    if (!isAdmin || !firebaseUser) {
+      throw new Error('Only store administrators can preview order history deletion.');
+    }
+
+    const rawStart = (filter.startDate || '').trim().slice(0, 10);
+    const rawEnd = filter.mode === 'single' ? rawStart : (filter.endDate || '').trim().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(rawStart) || !/^\d{4}-\d{2}-\d{2}$/.test(rawEnd)) {
+      throw new Error('Please choose valid start and end dates.');
+    }
+    const [startDateStr, endDateStr] =
+      rawStart <= rawEnd ? [rawStart, rawEnd] : [rawEnd, rawStart];
+
+    const startBound = new Date(`${startDateStr}T00:00:00.000`);
+    const endBound = new Date(`${endDateStr}T23:59:59.999`);
+    if (Number.isNaN(startBound.getTime()) || Number.isNaN(endBound.getTime())) {
+      throw new Error('Invalid date range selected.');
+    }
+
+    const startIso = startBound.toISOString();
+    const endIso = endBound.toISOString();
+    const matchedMap = new Map<string, Order>();
+
+    const matchesLocalDate = (rawDate?: string): boolean => {
+      if (!rawDate) return false;
+      const d = new Date(rawDate);
+      if (Number.isNaN(d.getTime())) {
+        const prefix = rawDate.slice(0, 10);
+        return prefix >= startDateStr && prefix <= endDateStr;
+      }
+      const localYmd = format(d, 'yyyy-MM-dd');
+      return localYmd >= startDateStr && localYmd <= endDateStr;
+    };
+
+    // 1. Check loaded in-memory orders first
+    for (const o of allOrders) {
+      if (matchesLocalDate(o.date)) {
+        matchedMap.set(o.id, o);
+      }
+    }
+
+    // 2. Query Firestore directly by date range so historical orders beyond initial 100 are found accurately
+    if (isBootstrappedAdmin) {
+      try {
+        let cursorDoc: QueryDocumentSnapshot<DocumentData> | null = null;
+        for (let page = 0; page < 10; page += 1) {
+          const qRef = cursorDoc
+            ? query(
+                collection(db, 'orders'),
+                where('date', '>=', startIso),
+                where('date', '<=', endIso),
+                orderBy('date', 'desc'),
+                startAfter(cursorDoc),
+                limit(500)
+              )
+            : query(
+                collection(db, 'orders'),
+                where('date', '>=', startIso),
+                where('date', '<=', endIso),
+                orderBy('date', 'desc'),
+                limit(500)
+              );
+          const snap = await getDocs(qRef);
+          snap.docs.forEach((docSnap) => {
+            const ord = { ...(docSnap.data() as Order), id: docSnap.id };
+            if (matchesLocalDate(ord.date)) {
+              matchedMap.set(ord.id, ord);
+            }
+          });
+          if (snap.docs.length < 500) break;
+          cursorDoc = snap.docs[snap.docs.length - 1];
+        }
+      } catch (err) {
+        console.warn('Firestore range preview fell back to loaded orders:', err);
+      }
+    }
+
+    const includeActive = Boolean(filter.includeActiveOrders);
+    const filtered = Array.from(matchedMap.values())
+      .filter((o) =>
+        includeActive ? true : o.status === 'delivered' || o.status === 'cancelled'
+      )
+      .sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
+
+    return {
+      orders: filtered,
+      totalCount: filtered.length,
+      deliveredCount: filtered.filter((o) => o.status === 'delivered').length,
+      cancelledCount: filtered.filter((o) => o.status === 'cancelled').length,
+      activeCount: filtered.filter(
+        (o) => o.status !== 'delivered' && o.status !== 'cancelled'
+      ).length,
+      totalAmount: filtered.reduce((sum, o) => sum + (Number(o.total) || 0), 0)
+    };
+  };
+
+  const deleteOrdersManually = async (
+    options: DeleteOrdersManuallyOptions
+  ): Promise<DeleteOrdersManuallyResult> => {
+    if (!isAdmin || !firebaseUser) {
+      throw new Error('Only store administrators can manually delete order history.');
+    }
+
+    const uniqueOrdersMap = new Map<string, Order>();
+    for (const o of options.ordersToDelete) {
+      if (o?.id && /^[a-zA-Z0-9_-]{1,128}$/.test(o.id)) {
+        uniqueOrdersMap.set(o.id, o);
+      }
+    }
+    const targetOrders = Array.from(uniqueOrdersMap.values());
+    if (targetOrders.length === 0) {
+      return {
+        deletedOrdersCount: 0,
+        deletedLedgerCount: 0,
+        deletedProofFilesCount: 0,
+        sqliteDeletedRows: 0,
+        supabaseDeletedRows: 0
+      };
+    }
+
+    const targetIds = targetOrders.map((o) => o.id);
+
+    // 1. Delete Firestore /orders, /dispatchFeed, /active_deliveries in chunks of 100 (<= 300 writes per batch)
+    try {
+      for (let i = 0; i < targetIds.length; i += 100) {
+        const chunk = targetIds.slice(i, i + 100);
+        const batch = writeBatch(db);
+        for (const oid of chunk) {
+          batch.delete(doc(db, 'orders', oid));
+          batch.delete(doc(db, 'dispatchFeed', oid));
+          batch.delete(doc(db, 'active_deliveries', oid));
+        }
+        await batch.commit();
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `orders/${targetIds[0]}`);
+    }
+
+    // 2. Optionally delete linked walletLedger records in Firestore
+    let deletedLedgerCount = 0;
+    if (options.deleteLedgerEntries && isBootstrappedAdmin) {
+      try {
+        const ledgerIdsToDelete: string[] = [];
+        for (let i = 0; i < targetIds.length; i += 30) {
+          const idChunk = targetIds.slice(i, i + 30);
+          const snap = await getDocs(
+            query(collection(db, 'walletLedger'), where('orderId', 'in', idChunk), limit(500))
+          );
+          snap.docs.forEach((d) => ledgerIdsToDelete.push(d.id));
+        }
+        for (let i = 0; i < ledgerIdsToDelete.length; i += 400) {
+          const chunk = ledgerIdsToDelete.slice(i, i + 400);
+          const batch = writeBatch(db);
+          chunk.forEach((ledId) => batch.delete(doc(db, 'walletLedger', ledId)));
+          await batch.commit();
+        }
+        deletedLedgerCount = ledgerIdsToDelete.length;
+      } catch (err) {
+        console.warn('Wallet ledger Firestore cleanup skipped:', err);
+      }
+    }
+
+    // 3. Remove deleted IDs immediately from local UI state
+    const deletedSet = new Set(targetIds);
+    setLiveOrdersWindow((prev) => prev.filter((o) => !deletedSet.has(o.id)));
+    setExtraOrders((prev) => prev.filter((o) => !deletedSet.has(o.id)));
+
+    // 4. Delete SQLite WAL archive, Supabase PostgreSQL archive & optional proof photos via secured admin API
+    let sqliteDeletedRows = 0;
+    let supabaseDeletedRows = 0;
+    let deletedProofFilesCount = 0;
+    try {
+      const token = await firebaseUser.getIdToken();
+      const proofImageUrls = options.deleteProofPhotos
+        ? targetOrders
+            .map((o) => o.proofImageUrl || '')
+            .filter((u) => typeof u === 'string' && u.includes('/uploads/proof_'))
+        : [];
+      const res = await adminApiFetch('/api/admin/orders/delete-history', token, {
+        method: 'POST',
+        body: JSON.stringify({
+          orderIds: targetIds,
+          deleteLedgerEntries: Boolean(options.deleteLedgerEntries),
+          proofImageUrls
+        })
+      });
+      if (res.ok) {
+        const body = (await res.json()) as {
+          deletedOrderArchiveRows?: number;
+          deletedLedgerArchiveRows?: number;
+          deletedProofFiles?: number;
+          supabaseDeletedRows?: number;
+        };
+        sqliteDeletedRows = Number(body.deletedOrderArchiveRows) || 0;
+        supabaseDeletedRows = Number(body.supabaseDeletedRows) || 0;
+        deletedProofFilesCount = Number(body.deletedProofFiles) || 0;
+        if (!deletedLedgerCount && body.deletedLedgerArchiveRows) {
+          deletedLedgerCount = Number(body.deletedLedgerArchiveRows) || 0;
+        }
+      }
+    } catch (err) {
+      console.warn('Archive DB order history cleanup failed:', err);
+    }
+
+    return {
+      deletedOrdersCount: targetIds.length,
+      deletedLedgerCount,
+      deletedProofFilesCount,
+      sqliteDeletedRows,
+      supabaseDeletedRows
+    };
+  };
+
   const toggleBlockUser = async (userId: string): Promise<void> => {
     const target = allUsers.find((u) => u.id === userId);
     if (!target) return;
@@ -1083,6 +1338,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         updateOrderStatus,
         updateOrderDetails,
         assignOrderToDelivery,
+        previewOrdersForDateDeletion,
+        deleteOrdersManually,
         allUsers,
         hasMoreUsers,
         loadingMoreUsers,

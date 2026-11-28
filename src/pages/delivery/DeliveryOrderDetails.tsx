@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useDelivery } from '../../context/DeliveryContext';
 import { useToast } from '../../context/ToastContext';
@@ -15,10 +15,23 @@ import {
   MapPin,
   Clock,
   Radio,
-  Camera
+  Camera,
+  Settings2
 } from 'lucide-react';
 import { formatCurrency, formatPaymentMethodLabel, getProductFrontImage } from '../../lib/utils';
 import { haversineDistanceMeters, uploadCompressedMedia } from '../../lib/imageUtils';
+import { LocationPermissionModal } from '../../components/delivery/LocationPermissionModal';
+import { PushPermissionBanner } from '../../components/PushPermissionBanner';
+import {
+  GeoPermissionState,
+  openDeviceLocationSettingsDirectly,
+  subscribeGeolocationPermissionChange
+} from '../../lib/locationPermission';
+import {
+  enableAndSubscribePush,
+  getNotificationPermissionState,
+  sendLocationPermissionPushReminder
+} from '../../lib/pushNotifications';
 
 export const DeliveryOrderDetails = () => {
   const { id } = useParams();
@@ -45,11 +58,19 @@ export const DeliveryOrderDetails = () => {
   const [busy, setBusy] = useState(false);
 
   // Throttled GPS Streaming state (every 10s or 30m)
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [geoPermission, setGeoPermission] = useState<GeoPermissionState>('prompt');
   const [gpsEnabled, setGpsEnabled] = useState(true);
   const [gpsStatus, setGpsStatus] = useState<'idle' | 'streaming' | 'denied' | 'error' | 'unsupported'>('idle');
   const [gpsErrorMsg, setGpsErrorMsg] = useState('');
+  const [showLocationModal, setShowLocationModal] = useState(false);
+  const [syncingNow, setSyncingNow] = useState(false);
   const [lastPingCoords, setLastPingCoords] = useState<{ lat: number; lng: number; time: string } | null>(null);
   const lastPingRef = useRef<{ lat: number; lng: number; timestamp: number } | null>(null);
+
+  useEffect(() => {
+    return subscribeGeolocationPermissionChange(setGeoPermission);
+  }, []);
 
   // Proof photo upload state (< 200 KB compressed)
   const [proofUrl, setProofUrl] = useState('');
@@ -169,16 +190,56 @@ export const DeliveryOrderDetails = () => {
     };
   }, [gpsEnabled, orderId, orderStatus, orderAssignedUid, deliveryUser?.isApproved, deliveryUser?.uid, upsertActiveGpsLocation]);
 
-  const handleManualGpsRefresh = () => {
+  const triggerLocationPermissionPushFallback = useCallback(async (targetOrderId: string) => {
+    if (getNotificationPermissionState() === 'default') {
+      await enableAndSubscribePush({ role: 'delivery', sendTest: false });
+    }
+    if (getNotificationPermissionState() === 'granted') {
+      await sendLocationPermissionPushReminder({
+        url: `/delivery/order/${targetOrderId}`,
+        orderId: targetOrderId
+      });
+    }
+  }, []);
+
+  const openDirectLocationSettings = useCallback(() => {
+    setSyncingNow(false);
+    openDeviceLocationSettingsDirectly('location_source');
+    setShowLocationModal(true);
+  }, []);
+
+  const handleManualGpsRefresh = useCallback(() => {
     const latestOrder = orderRef.current;
-    if (!latestOrder || !('geolocation' in navigator)) return;
+    if (!latestOrder) return;
+    if (!('geolocation' in navigator) || geoPermission === 'unsupported') {
+      setGpsStatus('unsupported');
+      setGpsErrorMsg('Open Device Location Settings to allow GPS access.');
+      openDirectLocationSettings();
+      void triggerLocationPermissionPushFallback(latestOrder.id);
+      return;
+    }
+
+    if (geoPermission === 'denied') {
+      setGpsStatus('denied');
+      setGpsErrorMsg('Allow Location in Device Settings, then return here.');
+      openDirectLocationSettings();
+      void triggerLocationPermissionPushFallback(latestOrder.id);
+      return;
+    }
+
+    setSyncingNow(true);
+    // Call geolocation synchronously on click to preserve Android/iOS user gesture
     navigator.geolocation.getCurrentPosition(
       (position) => {
+        setSyncingNow(false);
+        setGeoPermission('granted');
         const { latitude, longitude, accuracy, speed, heading } = position.coords;
         const now = Date.now();
         lastPingRef.current = { lat: latitude, lng: longitude, timestamp: now };
+        setGpsEnabled(true);
         setGpsStatus('streaming');
         setGpsErrorMsg('');
+        setShowLocationModal(false);
         setLastPingCoords({
           lat: latitude,
           lng: longitude,
@@ -194,13 +255,41 @@ export const DeliveryOrderDetails = () => {
           .then(() => showToast('GPS location synced', 'success'))
           .catch(() => showToast('Failed to sync GPS ping.', 'error'));
       },
-      () => {
-        setGpsStatus('denied');
-        showToast('Unable to access device GPS. Allow location permission and retry.', 'error');
+      (geoErr) => {
+        setSyncingNow(false);
+        if (geoErr.code === geoErr.PERMISSION_DENIED) {
+          setGeoPermission('denied');
+          setGpsStatus('denied');
+          setGpsErrorMsg('Allow Location in Device Settings, then return here.');
+        } else {
+          setGpsStatus('error');
+          setGpsErrorMsg('Turn ON Location in Device Settings and allow permission.');
+        }
+        openDirectLocationSettings();
+        void triggerLocationPermissionPushFallback(latestOrder.id);
       },
-      { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
+      { enableHighAccuracy: false, maximumAge: 30000, timeout: 6000 }
     );
-  };
+  }, [geoPermission, openDirectLocationSettings, showToast, triggerLocationPermissionPushFallback, upsertActiveGpsLocation]);
+
+  useEffect(() => {
+    const onRequestSync = () => {
+      handleManualGpsRefresh();
+    };
+    window.addEventListener('fv-request-location-sync', onRequestSync);
+    return () => {
+      window.removeEventListener('fv-request-location-sync', onRequestSync);
+    };
+  }, [handleManualGpsRefresh]);
+
+  useEffect(() => {
+    if (searchParams.get('syncLocation') === '1' && order?.id) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('syncLocation');
+      setSearchParams(next, { replace: true });
+      handleManualGpsRefresh();
+    }
+  }, [searchParams, setSearchParams, order?.id, handleManualGpsRefresh]);
 
   if (!authReady || partnerLoading) {
     return (
@@ -484,6 +573,8 @@ export const DeliveryOrderDetails = () => {
       </div>
 
       <div className="p-4 space-y-4">
+        <PushPermissionBanner role="delivery" theme="dark" />
+
         {!isAssignedToMe && (
           <div className="bg-amber-500/15 border border-amber-500/30 p-3.5 rounded-xl flex items-center gap-2.5 text-xs text-amber-300">
             <AlertTriangle size={16} className="shrink-0" />
@@ -495,65 +586,90 @@ export const DeliveryOrderDetails = () => {
         {isAssignedToMe &&
           (assignedOrder.status === 'packed' ||
             assignedOrder.status === 'out_for_delivery') && (
-            <div className="bg-gray-800 p-4 rounded-xl border border-gray-700 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3 min-w-0">
-                <div
-                  className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${
-                    gpsStatus === 'streaming'
-                      ? 'bg-blue-500/20 text-blue-400'
-                      : gpsStatus === 'denied' || gpsStatus === 'unsupported'
-                      ? 'bg-red-500/20 text-red-400'
-                      : 'bg-gray-700 text-gray-400'
-                  }`}
-                >
-                  <Radio
-                    size={18}
-                    className={gpsStatus === 'streaming' ? 'animate-pulse' : ''}
-                  />
+            <div className="bg-gray-800 p-4 rounded-xl border border-gray-700 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div
+                    className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${
+                      gpsStatus === 'streaming'
+                        ? 'bg-blue-500/20 text-blue-400'
+                        : gpsStatus === 'denied' || gpsStatus === 'unsupported'
+                        ? 'bg-red-500/20 text-red-400'
+                        : 'bg-gray-700 text-gray-400'
+                    }`}
+                  >
+                    <Radio
+                      size={18}
+                      className={gpsStatus === 'streaming' ? 'animate-pulse' : ''}
+                    />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-white">
+                      {gpsStatus === 'streaming'
+                        ? 'Live GPS Streaming (10s / 30m throttle)'
+                        : gpsStatus === 'denied'
+                        ? 'Location permission denied'
+                        : gpsStatus === 'unsupported'
+                        ? 'GPS unavailable on this device'
+                        : gpsStatus === 'error'
+                        ? 'GPS signal temporarily weak'
+                        : 'GPS paused'}
+                    </p>
+                    <p className="text-[11px] text-gray-400 truncate">
+                      {gpsErrorMsg
+                        ? gpsErrorMsg
+                        : lastPingCoords
+                        ? `Last ping ${lastPingCoords.time} (${lastPingCoords.lat.toFixed(4)}, ${lastPingCoords.lng.toFixed(4)})`
+                        : 'Acquiring GPS coordinates...'}
+                    </p>
+                  </div>
                 </div>
-                <div className="min-w-0">
-                  <p className="text-xs font-bold text-white">
-                    {gpsStatus === 'streaming'
-                      ? 'Live GPS Streaming (10s / 30m throttle)'
-                      : gpsStatus === 'denied'
-                      ? 'Location permission denied'
-                      : gpsStatus === 'unsupported'
-                      ? 'GPS unavailable on this device'
-                      : gpsStatus === 'error'
-                      ? 'GPS signal temporarily weak'
-                      : 'GPS paused'}
-                  </p>
-                  <p className="text-[11px] text-gray-400 truncate">
-                    {gpsErrorMsg
-                      ? gpsErrorMsg
-                      : lastPingCoords
-                      ? `Last ping ${lastPingCoords.time} (${lastPingCoords.lat.toFixed(4)}, ${lastPingCoords.lng.toFixed(4)})`
-                      : 'Acquiring GPS coordinates...'}
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center gap-1.5 shrink-0">
-                {(gpsStatus === 'denied' || gpsStatus === 'error' || (gpsEnabled && !lastPingCoords)) && (
+                <div className="flex items-center gap-1.5 shrink-0">
                   <button
                     type="button"
-                    onClick={handleManualGpsRefresh}
-                    className="px-2.5 py-1.5 rounded-lg text-xs font-bold border bg-gray-700 border-gray-600 text-gray-200 hover:bg-gray-600 transition"
+                    onClick={openDirectLocationSettings}
+                    className="p-1.5 rounded-lg bg-gray-700 hover:bg-gray-600 text-amber-300 border border-gray-600"
+                    title="Open Device Location Settings"
                   >
-                    Sync Now
+                    <Settings2 size={15} />
                   </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => setGpsEnabled((prev) => !prev)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition ${
-                    gpsEnabled
-                      ? 'bg-blue-500/20 border-blue-500/40 text-blue-300'
-                      : 'bg-gray-700 border-gray-600 text-gray-300'
-                  }`}
-                >
-                  {gpsEnabled ? 'Pause GPS' : 'Resume GPS'}
-                </button>
+                  <button
+                    type="button"
+                    disabled={syncingNow}
+                    onClick={handleManualGpsRefresh}
+                    className="px-2.5 py-1.5 rounded-lg text-xs font-bold border bg-emerald-600 hover:bg-emerald-500 border-emerald-500 text-white transition disabled:opacity-60"
+                  >
+                    {syncingNow ? 'Syncing...' : 'Sync Now'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setGpsEnabled((prev) => !prev)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition ${
+                      gpsEnabled
+                        ? 'bg-blue-500/20 border-blue-500/40 text-blue-300'
+                        : 'bg-gray-700 border-gray-600 text-gray-300'
+                    }`}
+                  >
+                    {gpsEnabled ? 'Pause GPS' : 'Resume GPS'}
+                  </button>
+                </div>
               </div>
+
+              {(gpsStatus === 'denied' || gpsStatus === 'unsupported') && (
+                <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-[11px] text-red-200">
+                    GPS blocked by device settings. Open device location settings to allow access.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={openDirectLocationSettings}
+                    className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-bold inline-flex items-center gap-1.5"
+                  >
+                    <Settings2 size={14} />
+                    Open Location Settings
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -1002,6 +1118,13 @@ export const DeliveryOrderDetails = () => {
           </div>
         </div>
       )}
+      <LocationPermissionModal
+        open={showLocationModal}
+        onClose={() => setShowLocationModal(false)}
+        onRetrySync={handleManualGpsRefresh}
+        orderId={assignedOrder.id}
+        targetRoute={`/delivery/order/${assignedOrder.id}`}
+      />
     </div>
   );
 };

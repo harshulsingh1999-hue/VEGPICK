@@ -23,6 +23,7 @@ import {
   Coupon,
   Complaint,
   ServiceArea,
+  DeliverySlot,
   AppSettings,
   DEFAULT_APP_SETTINGS
 } from '../lib/data';
@@ -81,6 +82,14 @@ interface StoreContextType {
     reason?: string;
   };
 
+  deliverySlots: DeliverySlot[];
+  addDeliverySlot: (slot: Omit<DeliverySlot, 'id'>) => Promise<DeliverySlot>;
+  updateDeliverySlot: (id: string, updates: Partial<DeliverySlot>) => Promise<void>;
+  deleteDeliverySlot: (id: string) => Promise<void>;
+  toggleDeliverySlot: (id: string) => Promise<void>;
+  bulkCreateDeliverySlots: (slots: Array<Omit<DeliverySlot, 'id'>>) => Promise<DeliverySlot[]>;
+  deleteDeliverySlotsByDate: (slotDate: string) => Promise<number>;
+
   appSettings: AppSettings;
   updateAppSettings: (settings: Partial<AppSettings>) => Promise<void>;
 }
@@ -95,8 +104,60 @@ interface CatalogCachePayload {
   products: Product[];
   coupons: Coupon[];
   serviceAreas: ServiceArea[];
+  deliverySlots: DeliverySlot[];
   settings: AppSettings;
 }
+
+const sortDeliverySlotsList = (list: DeliverySlot[]): DeliverySlot[] =>
+  [...list].sort((a, b) => {
+    if (a.scheduleType !== b.scheduleType) {
+      return a.scheduleType === 'date' ? -1 : 1;
+    }
+    if (a.scheduleType === 'date' && a.slotDate !== b.slotDate) {
+      return a.slotDate.localeCompare(b.slotDate);
+    }
+    if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
+    return a.startTime.localeCompare(b.startTime);
+  });
+
+const normalizeDeliverySlotInput = (
+  input: Omit<DeliverySlot, 'id'>
+): Omit<DeliverySlot, 'id'> => {
+  const scheduleType: 'date' | 'daily' = input.scheduleType === 'date' ? 'date' : 'daily';
+  const rawDate = (input.slotDate || '').trim().slice(0, 10);
+  if (scheduleType === 'date' && !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(rawDate)) {
+    throw new Error('Please choose a valid slot date (YYYY-MM-DD).');
+  }
+  const slotDate = scheduleType === 'daily' ? '' : rawDate;
+
+  const timeRegex = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
+  const startTime = (input.startTime || '').trim();
+  const endTime = (input.endTime || '').trim();
+  if (!timeRegex.test(startTime) || !timeRegex.test(endTime)) {
+    throw new Error('Start time and end time must use valid HH:MM format.');
+  }
+  if (endTime <= startTime) {
+    throw new Error('Slot end time must be after start time.');
+  }
+
+  const label = (input.label || '').trim().slice(0, 80);
+  if (!label) {
+    throw new Error('Delivery slot label cannot be empty.');
+  }
+
+  return {
+    scheduleType,
+    slotDate,
+    startTime,
+    endTime,
+    label,
+    isActive: Boolean(input.isActive),
+    maxOrders: Math.max(0, Math.min(100000, Math.round(Number(input.maxOrders) || 0))),
+    cutoffMinutes: Math.max(0, Math.min(1440, Math.round(Number(input.cutoffMinutes) || 0))),
+    sortOrder: Math.max(0, Math.min(10000, Math.round(Number(input.sortOrder) || 0))),
+    notes: (input.notes || '').trim().slice(0, 240)
+  };
+};
 
 const readCatalogSwr = (): CatalogCachePayload | null => {
   try {
@@ -108,6 +169,7 @@ const readCatalogSwr = (): CatalogCachePayload | null => {
       products: parsed.products,
       coupons: Array.isArray(parsed.coupons) ? parsed.coupons : [],
       serviceAreas: Array.isArray(parsed.serviceAreas) ? parsed.serviceAreas : [],
+      deliverySlots: Array.isArray(parsed.deliverySlots) ? parsed.deliverySlots : [],
       settings: parsed.settings
         ? { ...DEFAULT_APP_SETTINGS, ...parsed.settings }
         : DEFAULT_APP_SETTINGS
@@ -133,6 +195,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [productsLoading, setProductsLoading] = useState(!initialSwr);
   const [coupons, setCoupons] = useState<Coupon[]>(initialSwr?.coupons || []);
   const [serviceAreas, setServiceAreas] = useState<ServiceArea[]>(initialSwr?.serviceAreas || []);
+  const [deliverySlots, setDeliverySlots] = useState<DeliverySlot[]>(
+    sortDeliverySlotsList(initialSwr?.deliverySlots || [])
+  );
   const [complaints, setComplaints] = useState<Complaint[]>([]);
   const [appSettings, setAppSettings] = useState<AppSettings>(
     initialSwr?.settings || DEFAULT_APP_SETTINGS
@@ -181,6 +246,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           products?: Product[];
           coupons?: Coupon[];
           serviceAreas?: ServiceArea[];
+          deliverySlots?: DeliverySlot[];
           settings?: Partial<AppSettings> | null;
         };
         if (Array.isArray(data.products) && (data.products.length > 0 || Array.isArray(data.serviceAreas))) {
@@ -189,15 +255,20 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             : DEFAULT_APP_SETTINGS;
           const nextCoupons = Array.isArray(data.coupons) ? data.coupons : [];
           const nextAreas = Array.isArray(data.serviceAreas) ? data.serviceAreas : [];
+          const nextSlots = sortDeliverySlotsList(
+            Array.isArray(data.deliverySlots) ? data.deliverySlots : []
+          );
           setProducts(data.products);
           setCoupons(nextCoupons);
           setServiceAreas(nextAreas);
+          setDeliverySlots(nextSlots);
           setAppSettings(nextSettings);
           setProductsLoading(false);
           writeCatalogSwr({
             products: data.products,
             coupons: nextCoupons,
             serviceAreas: nextAreas,
+            deliverySlots: nextSlots,
             settings: nextSettings
           });
           return;
@@ -209,10 +280,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     // One-shot Firestore fallback (no persistent WebSocket listener for public shoppers)
     try {
-      const [prodSnap, couponSnap, areaSnap, settingsSnap] = await Promise.all([
+      const [prodSnap, couponSnap, areaSnap, slotSnap, settingsSnap] = await Promise.all([
         getDocs(query(collection(db, 'products'), where('pricePerKg', '>=', 0), limit(200))),
         getDocs(query(collection(db, 'coupons'), where('isActive', '==', true), limit(50))),
         getDocs(query(collection(db, 'serviceAreas'), where('isActive', '==', true), limit(200))),
+        getDocs(query(collection(db, 'deliverySlots'), where('sortOrder', '>=', 0), limit(500))),
         getDoc(doc(db, 'settings', 'store'))
       ]);
 
@@ -228,6 +300,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         ...(d.data() as ServiceArea),
         id: d.id
       }));
+      const nextSlots: DeliverySlot[] = sortDeliverySlotsList(
+        slotSnap.docs.map((d) => ({
+          ...(d.data() as DeliverySlot),
+          id: d.id
+        }))
+      );
       const nextSettings: AppSettings = settingsSnap.exists()
         ? { ...DEFAULT_APP_SETTINGS, ...(settingsSnap.data() as Partial<AppSettings>) }
         : DEFAULT_APP_SETTINGS;
@@ -235,12 +313,14 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setProducts(nextProducts);
       setCoupons(nextCoupons);
       setServiceAreas(nextAreas);
+      setDeliverySlots(nextSlots);
       setAppSettings(nextSettings);
       setProductsLoading(false);
       writeCatalogSwr({
         products: nextProducts,
         coupons: nextCoupons,
         serviceAreas: nextAreas,
+        deliverySlots: nextSlots,
         settings: nextSettings
       });
     } catch (error) {
@@ -323,11 +403,26 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
     );
 
+    const unsubSlots = onSnapshot(
+      query(collection(db, 'deliverySlots'), limit(500)),
+      (snapshot) => {
+        const list: DeliverySlot[] = snapshot.docs.map((d) => ({
+          ...(d.data() as DeliverySlot),
+          id: d.id
+        }));
+        setDeliverySlots(sortDeliverySlotsList(list));
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.LIST, 'deliverySlots');
+      }
+    );
+
     return () => {
       unsubProducts();
       unsubSettings();
       unsubCoupons();
       unsubAreas();
+      unsubSlots();
     };
   }, [authReady, isBootstrappedAdmin, fetchEdgeCatalogAndFallback]);
 
@@ -595,14 +690,33 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // Admin Coupons CRUD
   const addCoupon = async (coupon: Coupon): Promise<void> => {
     const cleanCode = coupon.code.toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 32);
+    if (cleanCode.length < 2) {
+      throw new Error('Coupon code must contain at least 2 letters or numbers.');
+    }
+    const cleanDesc = coupon.description.trim().slice(0, 240);
+    if (!cleanDesc) {
+      throw new Error('Coupon description cannot be empty.');
+    }
+    const cleanExpiry = (coupon.expiry || '').trim().slice(0, 32);
+    if (cleanExpiry.length < 4) {
+      throw new Error('Please choose a valid coupon expiry date.');
+    }
+    const rawDiscount = Number(coupon.discountValue);
+    const rawMinOrder = Number(coupon.minOrder);
     const savedCoupon: Coupon = {
       code: cleanCode,
-      description: coupon.description.trim().slice(0, 240),
+      description: cleanDesc,
       discountType: coupon.discountType,
-      discountValue: Math.max(0, Number(coupon.discountValue) || 0),
-      minOrder: Math.max(0, Number(coupon.minOrder) || 0),
+      discountValue: Math.max(
+        0,
+        Math.min(10000, Number.isFinite(rawDiscount) ? rawDiscount : 0)
+      ),
+      minOrder: Math.max(
+        0,
+        Math.min(100000, Number.isFinite(rawMinOrder) ? rawMinOrder : 0)
+      ),
       isActive: Boolean(coupon.isActive),
-      expiry: coupon.expiry.slice(0, 32)
+      expiry: cleanExpiry
     };
     try {
       await setDoc(doc(db, 'coupons', cleanCode), {
@@ -921,6 +1035,173 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [appSettings.restrictToServiceAreas, serviceAreas]
   );
 
+  // Delivery Slot Schedule Management (Admin)
+  const addDeliverySlot = async (slot: Omit<DeliverySlot, 'id'>): Promise<DeliverySlot> => {
+    const clean = normalizeDeliverySlotInput(slot);
+    const id = `slot_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const payload: Record<string, unknown> = {
+      id,
+      scheduleType: clean.scheduleType,
+      slotDate: clean.slotDate,
+      startTime: clean.startTime,
+      endTime: clean.endTime,
+      label: clean.label,
+      isActive: clean.isActive,
+      maxOrders: clean.maxOrders,
+      cutoffMinutes: clean.cutoffMinutes,
+      sortOrder: clean.sortOrder,
+      ...(clean.notes ? { notes: clean.notes } : {}),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    };
+
+    try {
+      await setDoc(doc(db, 'deliverySlots', id), payload);
+      const created: DeliverySlot = { ...clean, id };
+      if (!isBootstrappedAdmin) {
+        setDeliverySlots((prev) => sortDeliverySlotsList([...prev, created]));
+      }
+      invalidateCatalogCache();
+      return created;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, `deliverySlots/${id}`);
+    }
+  };
+
+  const updateDeliverySlot = async (id: string, updates: Partial<DeliverySlot>): Promise<void> => {
+    const existing = deliverySlots.find((s) => s.id === id);
+    if (!existing) return;
+
+    const clean = normalizeDeliverySlotInput({
+      scheduleType: updates.scheduleType ?? existing.scheduleType,
+      slotDate: updates.slotDate !== undefined ? updates.slotDate : existing.slotDate,
+      startTime: updates.startTime ?? existing.startTime,
+      endTime: updates.endTime ?? existing.endTime,
+      label: updates.label ?? existing.label,
+      isActive: updates.isActive ?? existing.isActive,
+      maxOrders: updates.maxOrders !== undefined ? updates.maxOrders : existing.maxOrders,
+      cutoffMinutes: updates.cutoffMinutes !== undefined ? updates.cutoffMinutes : existing.cutoffMinutes,
+      sortOrder: updates.sortOrder !== undefined ? updates.sortOrder : existing.sortOrder,
+      notes: updates.notes !== undefined ? updates.notes : existing.notes
+    });
+
+    const payload: Record<string, unknown> = {
+      scheduleType: clean.scheduleType,
+      slotDate: clean.slotDate,
+      startTime: clean.startTime,
+      endTime: clean.endTime,
+      label: clean.label,
+      isActive: clean.isActive,
+      maxOrders: clean.maxOrders,
+      cutoffMinutes: clean.cutoffMinutes,
+      sortOrder: clean.sortOrder,
+      notes: clean.notes ? clean.notes : deleteField(),
+      updatedAt: serverTimestamp()
+    };
+
+    try {
+      await updateDoc(doc(db, 'deliverySlots', id), payload);
+      if (!isBootstrappedAdmin) {
+        const merged: DeliverySlot = { ...clean, id };
+        setDeliverySlots((prev) =>
+          sortDeliverySlotsList(prev.map((s) => (s.id === id ? merged : s)))
+        );
+      }
+      invalidateCatalogCache();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `deliverySlots/${id}`);
+    }
+  };
+
+  const deleteDeliverySlot = async (id: string): Promise<void> => {
+    try {
+      await deleteDoc(doc(db, 'deliverySlots', id));
+      if (!isBootstrappedAdmin) {
+        setDeliverySlots((prev) => prev.filter((s) => s.id !== id));
+      }
+      invalidateCatalogCache();
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `deliverySlots/${id}`);
+    }
+  };
+
+  const toggleDeliverySlot = async (id: string): Promise<void> => {
+    const target = deliverySlots.find((s) => s.id === id);
+    if (!target) return;
+    await updateDeliverySlot(id, { isActive: !target.isActive });
+  };
+
+  const bulkCreateDeliverySlots = async (
+    slots: Array<Omit<DeliverySlot, 'id'>>
+  ): Promise<DeliverySlot[]> => {
+    if (slots.length === 0) return [];
+    const createdList: DeliverySlot[] = [];
+    const cleanedItems = slots.map((s, idx) => {
+      const clean = normalizeDeliverySlotInput(s);
+      const id = `slot_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 5)}`;
+      createdList.push({ ...clean, id });
+      return { id, clean };
+    });
+
+    try {
+      for (let i = 0; i < cleanedItems.length; i += 400) {
+        const batch = writeBatch(db);
+        const chunk = cleanedItems.slice(i, i + 400);
+        for (const item of chunk) {
+          batch.set(doc(db, 'deliverySlots', item.id), {
+            id: item.id,
+            scheduleType: item.clean.scheduleType,
+            slotDate: item.clean.slotDate,
+            startTime: item.clean.startTime,
+            endTime: item.clean.endTime,
+            label: item.clean.label,
+            isActive: item.clean.isActive,
+            maxOrders: item.clean.maxOrders,
+            cutoffMinutes: item.clean.cutoffMinutes,
+            sortOrder: item.clean.sortOrder,
+            ...(item.clean.notes ? { notes: item.clean.notes } : {}),
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp()
+          });
+        }
+        await batch.commit();
+      }
+      if (!isBootstrappedAdmin) {
+        setDeliverySlots((prev) => sortDeliverySlotsList([...prev, ...createdList]));
+      }
+      invalidateCatalogCache();
+      return createdList;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'deliverySlots');
+    }
+  };
+
+  const deleteDeliverySlotsByDate = async (slotDate: string): Promise<number> => {
+    const cleanDate = slotDate.trim().slice(0, 10);
+    const matching = deliverySlots.filter(
+      (s) => s.scheduleType === 'date' && s.slotDate === cleanDate
+    );
+    if (matching.length === 0) return 0;
+
+    try {
+      for (let i = 0; i < matching.length; i += 400) {
+        const batch = writeBatch(db);
+        matching.slice(i, i + 400).forEach((slot) => {
+          batch.delete(doc(db, 'deliverySlots', slot.id));
+        });
+        await batch.commit();
+      }
+      if (!isBootstrappedAdmin) {
+        const removedIds = new Set(matching.map((m) => m.id));
+        setDeliverySlots((prev) => prev.filter((s) => !removedIds.has(s.id)));
+      }
+      invalidateCatalogCache();
+      return matching.length;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `deliverySlots/${cleanDate}`);
+    }
+  };
+
   // App Settings
   const updateAppSettings = async (settings: Partial<AppSettings>): Promise<void> => {
     const cleanUpi = String(settings.upiId ?? appSettings.upiId ?? '').trim().slice(0, 100);
@@ -944,12 +1225,16 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       .toUpperCase()
       .slice(0, 20);
 
+    const rawTax = Number(settings.taxRate ?? appSettings.taxRate);
+    const rawFee = Number(settings.baseDeliveryFee ?? appSettings.baseDeliveryFee);
+    const rawThreshold = Number(settings.freeDeliveryThreshold ?? appSettings.freeDeliveryThreshold);
+
     const nextSettings: AppSettings = {
-      taxRate: Math.max(0, Math.min(50, Number(settings.taxRate ?? appSettings.taxRate))),
-      baseDeliveryFee: Math.max(0, Number(settings.baseDeliveryFee ?? appSettings.baseDeliveryFee)),
+      taxRate: Math.max(0, Math.min(50, Number.isFinite(rawTax) ? rawTax : 0)),
+      baseDeliveryFee: Math.max(0, Math.min(5000, Number.isFinite(rawFee) ? rawFee : 0)),
       freeDeliveryThreshold: Math.max(
         0,
-        Number(settings.freeDeliveryThreshold ?? appSettings.freeDeliveryThreshold)
+        Math.min(50000, Number.isFinite(rawThreshold) ? rawThreshold : 0)
       ),
       storeOpen: settings.storeOpen ?? appSettings.storeOpen,
       notificationsEnabled: settings.notificationsEnabled ?? appSettings.notificationsEnabled,
@@ -1083,6 +1368,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         selectedPincode,
         setSelectedPincode,
         checkPincodeServiceability,
+        deliverySlots,
+        addDeliverySlot,
+        updateDeliverySlot,
+        deleteDeliverySlot,
+        toggleDeliverySlot,
+        bulkCreateDeliverySlots,
+        deleteDeliverySlotsByDate,
         appSettings,
         updateAppSettings
       }}
