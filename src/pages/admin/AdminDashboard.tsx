@@ -392,7 +392,7 @@ export const AdminDashboard = () => {
   } | null>(null);
 
   useEffect(() => {
-    if (activeTab !== 'reports') return;
+    if (activeTab !== 'reports') return undefined;
     let active = true;
     apiFetch('/api/analytics/summary')
       .then((res) => (res.ok ? res.json() : null))
@@ -3002,6 +3002,36 @@ export const AdminDashboard = () => {
               }}
               className="space-y-3"
             >
+              {allUsers.length > 0 && (
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 mb-1">
+                    Quick-Select Registered User (Optional)
+                  </label>
+                  <select
+                    defaultValue=""
+                    onChange={(e) => {
+                      const picked = allUsers.find((u) => u.uid === e.target.value || u.id === e.target.value);
+                      if (!picked) return;
+                      setDriverForm((prev) => ({
+                        ...prev,
+                        uid: picked.uid || picked.id,
+                        email: picked.email || prev.email,
+                        name: picked.name || prev.name,
+                        phone: picked.phone || prev.phone
+                      }));
+                    }}
+                    className="w-full p-2.5 bg-blue-50/70 border border-blue-200 rounded-xl text-xs font-semibold text-gray-800 outline-none"
+                  >
+                    <option value="">-- Prefill from signed-in users ({allUsers.length}) --</option>
+                    {allUsers.map((u) => (
+                      <option key={u.id} value={u.uid || u.id}>
+                        {u.name} {u.phone ? `(${u.phone})` : ''} {u.email ? `• ${u.email}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-bold text-gray-600 mb-1">Partner Firebase UID *</label>
                 <input

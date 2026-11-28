@@ -44,20 +44,37 @@ export const DeliveryEarnings = () => {
 
   if (!deliveryUser || !deliveryUser.isApproved) return null;
 
-  const tripPay = stats.completed * 45;
-  const incentives = stats.completed >= 5 ? 150 : stats.completed >= 2 ? 50 : 0;
+  const deliveredOrders = assignedOrders.filter((o) => o.status === 'delivered');
+  const now = new Date();
+  const startOfTodayMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const sevenDaysAgoMs = startOfTodayMs - 6 * 24 * 60 * 60 * 1000;
+
+  const todayTrips = deliveredOrders.filter((o) => {
+    const t = new Date(o.date || 0).getTime();
+    return Number.isFinite(t) && t >= startOfTodayMs;
+  }).length;
+  const weekTrips = deliveredOrders.filter((o) => {
+    const t = new Date(o.date || 0).getTime();
+    return Number.isFinite(t) && t >= sevenDaysAgoMs;
+  }).length;
+
+  const tripPay = todayTrips * 45;
+  const incentives = todayTrips >= 5 ? 150 : todayTrips >= 2 ? 50 : 0;
   const todayEarnings = tripPay + incentives;
+
+  const ledgerTripCredits = walletLedger
+    .filter((entry) => entry.type === 'trip_credit')
+    .reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
+
   const totalHistoricalTrips = Math.max(
     deliveryUser.completedDeliveries,
-    stats.completed
+    deliveredOrders.length
   );
-  const weekEarnings = Math.max(
-    todayEarnings,
-    Math.min(totalHistoricalTrips, 45) * 45 + incentives
-  );
-  const monthEarnings = Math.max(
+  const weekEarnings = Math.max(todayEarnings, weekTrips * 45);
+  const lifetimeEarnings = Math.max(
     weekEarnings,
-    totalHistoricalTrips * 45 + incentives
+    ledgerTripCredits,
+    totalHistoricalTrips * 45
   );
 
   const handleDeposit = async () => {
@@ -84,7 +101,7 @@ export const DeliveryEarnings = () => {
         <div className="bg-gradient-to-br from-green-600 to-green-800 rounded-2xl p-5 shadow-lg shadow-green-900/50 mb-6 relative overflow-hidden">
           <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 rounded-full -mr-10 -mt-10"></div>
           <p className="text-green-100 text-sm font-medium mb-1">
-            Current Earnings
+            Today&apos;s Earnings
           </p>
           <h2 className="text-4xl font-bold mb-4">
             {formatCurrency(todayEarnings)}
@@ -92,15 +109,15 @@ export const DeliveryEarnings = () => {
 
           <div className="flex gap-6 text-sm">
             <div>
-              <p className="text-green-200 text-xs">Orders Completed</p>
-              <p className="font-bold">{stats.completed}</p>
+              <p className="text-green-200 text-xs">Today&apos;s Trips</p>
+              <p className="font-bold">{todayTrips}</p>
             </div>
             <div>
               <p className="text-green-200 text-xs">Trip Base (₹45/trip)</p>
               <p className="font-bold">{formatCurrency(tripPay)}</p>
             </div>
             <div>
-              <p className="text-green-200 text-xs">Bonus Incentive</p>
+              <p className="text-green-200 text-xs">Daily Bonus</p>
               <p className="font-bold">{formatCurrency(incentives)}</p>
             </div>
           </div>
@@ -110,7 +127,7 @@ export const DeliveryEarnings = () => {
           <div className="bg-gray-700/50 p-4 rounded-xl border border-gray-600">
             <div className="flex items-center gap-2 text-gray-400 mb-2">
               <Calendar size={16} />
-              <span className="text-xs font-medium uppercase">This Week</span>
+              <span className="text-xs font-medium uppercase">Last 7 Days ({weekTrips})</span>
             </div>
             <p className="text-xl font-bold">{formatCurrency(weekEarnings)}</p>
             <p className="text-xs text-green-400 flex items-center mt-1">
@@ -124,7 +141,7 @@ export const DeliveryEarnings = () => {
                 Lifetime ({totalHistoricalTrips} trips)
               </span>
             </div>
-            <p className="text-xl font-bold">{formatCurrency(monthEarnings)}</p>
+            <p className="text-xl font-bold">{formatCurrency(lifetimeEarnings)}</p>
           </div>
         </div>
       </div>

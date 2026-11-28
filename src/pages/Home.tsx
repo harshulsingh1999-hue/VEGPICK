@@ -181,7 +181,7 @@ export const Home = () => {
   useEffect(() => {
     if (liveBanners.length <= 1) {
       setCurrentBanner(0);
-      return;
+      return undefined;
     }
     const timer = setInterval(() => {
       setCurrentBanner((prev) => (prev + 1) % liveBanners.length);

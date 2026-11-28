@@ -46,7 +46,8 @@ export const DeliveryOrderDetails = () => {
 
   // Throttled GPS Streaming state (every 10s or 30m)
   const [gpsEnabled, setGpsEnabled] = useState(true);
-  const [gpsStatus, setGpsStatus] = useState<'idle' | 'streaming' | 'denied' | 'unsupported'>('idle');
+  const [gpsStatus, setGpsStatus] = useState<'idle' | 'streaming' | 'denied' | 'error' | 'unsupported'>('idle');
+  const [gpsErrorMsg, setGpsErrorMsg] = useState('');
   const [lastPingCoords, setLastPingCoords] = useState<{ lat: number; lng: number; time: string } | null>(null);
   const lastPingRef = useRef<{ lat: number; lng: number; timestamp: number } | null>(null);
 
@@ -60,6 +61,27 @@ export const DeliveryOrderDetails = () => {
     ? availableOrders.find((f) => f.orderId === id)
     : undefined;
 
+  const orderRef = useRef(order);
+  orderRef.current = order;
+
+  const handleGoBack = () => {
+    const historyState = window.history.state as { idx?: number } | null;
+    if (historyState && typeof historyState.idx === 'number' && historyState.idx > 0) {
+      navigate(-1);
+    } else {
+      navigate('/delivery/dashboard', { replace: true });
+    }
+  };
+
+  useEffect(() => {
+    setProofUrl('');
+    setProofInfo('');
+    setCustomerOtp('');
+    setPinError('');
+    lastPingRef.current = null;
+    setLastPingCoords(null);
+  }, [id]);
+
   useEffect(() => {
     if (authReady && !partnerLoading && (!deliveryUser || !deliveryUser.isApproved)) {
       navigate('/delivery/login', { replace: true });
@@ -67,26 +89,35 @@ export const DeliveryOrderDetails = () => {
   }, [authReady, partnerLoading, deliveryUser, navigate]);
 
   // Stream rider GPS to ephemeral /active_deliveries/{orderId} throttled to >= 10s OR >= 30m
+  const orderId = order?.id;
+  const orderStatus = order?.status;
+  const orderAssignedUid = order?.assignedToUid;
+
   useEffect(() => {
     if (
       !gpsEnabled ||
-      !order ||
+      !orderId ||
       !deliveryUser?.isApproved ||
-      order.assignedToUid !== deliveryUser.uid ||
-      (order.status !== 'packed' && order.status !== 'out_for_delivery')
+      orderAssignedUid !== deliveryUser.uid ||
+      (orderStatus !== 'packed' && orderStatus !== 'out_for_delivery')
     ) {
       setGpsStatus('idle');
-      return;
+      setGpsErrorMsg('');
+      return undefined;
     }
 
     if (!('geolocation' in navigator)) {
       setGpsStatus('unsupported');
-      return;
+      setGpsErrorMsg('Device browser does not support GPS geolocation.');
+      return undefined;
     }
 
     setGpsStatus('streaming');
+    setGpsErrorMsg('');
     const watchId = navigator.geolocation.watchPosition(
       (position) => {
+        const latestOrder = orderRef.current;
+        if (!latestOrder) return;
         const { latitude, longitude, accuracy, speed, heading } = position.coords;
         const now = Date.now();
         const prev = lastPingRef.current;
@@ -99,12 +130,14 @@ export const DeliveryOrderDetails = () => {
         // Throttle Firestore writes to >= 10 seconds OR >= 30 meters moved
         if (elapsedMs >= 10_000 || movedMeters >= 30) {
           lastPingRef.current = { lat: latitude, lng: longitude, timestamp: now };
+          setGpsStatus('streaming');
+          setGpsErrorMsg('');
           setLastPingCoords({
             lat: latitude,
             lng: longitude,
             time: new Date(now).toLocaleTimeString()
           });
-          upsertActiveGpsLocation(order, {
+          upsertActiveGpsLocation(latestOrder, {
             lat: latitude,
             lng: longitude,
             accuracy: accuracy ?? 15,
@@ -118,6 +151,10 @@ export const DeliveryOrderDetails = () => {
       (geoErr) => {
         if (geoErr.code === geoErr.PERMISSION_DENIED) {
           setGpsStatus('denied');
+          setGpsErrorMsg('Location access denied. Enable GPS permission in browser settings.');
+        } else {
+          setGpsStatus('error');
+          setGpsErrorMsg('GPS signal temporarily weak — retrying automatically.');
         }
       },
       {
@@ -130,7 +167,40 @@ export const DeliveryOrderDetails = () => {
     return () => {
       navigator.geolocation.clearWatch(watchId);
     };
-  }, [gpsEnabled, order, deliveryUser?.isApproved, deliveryUser?.uid, upsertActiveGpsLocation]);
+  }, [gpsEnabled, orderId, orderStatus, orderAssignedUid, deliveryUser?.isApproved, deliveryUser?.uid, upsertActiveGpsLocation]);
+
+  const handleManualGpsRefresh = () => {
+    const latestOrder = orderRef.current;
+    if (!latestOrder || !('geolocation' in navigator)) return;
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const { latitude, longitude, accuracy, speed, heading } = position.coords;
+        const now = Date.now();
+        lastPingRef.current = { lat: latitude, lng: longitude, timestamp: now };
+        setGpsStatus('streaming');
+        setGpsErrorMsg('');
+        setLastPingCoords({
+          lat: latitude,
+          lng: longitude,
+          time: new Date(now).toLocaleTimeString()
+        });
+        void upsertActiveGpsLocation(latestOrder, {
+          lat: latitude,
+          lng: longitude,
+          accuracy: accuracy ?? 15,
+          speed: speed ?? 0,
+          heading: heading ?? 0
+        })
+          .then(() => showToast('GPS location synced', 'success'))
+          .catch(() => showToast('Failed to sync GPS ping.', 'error'));
+      },
+      () => {
+        setGpsStatus('denied');
+        showToast('Unable to access device GPS. Allow location permission and retry.', 'error');
+      },
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
+    );
+  };
 
   if (!authReady || partnerLoading) {
     return (
@@ -162,7 +232,7 @@ export const DeliveryOrderDetails = () => {
       <div className="min-h-screen bg-gray-900 text-white pb-28">
         <div className="bg-gray-800 p-4 shadow-sm flex items-center gap-4 sticky top-0 z-10 border-b border-gray-700 safe-top">
           <button
-            onClick={() => navigate(-1)}
+            onClick={handleGoBack}
             className="p-2 hover:bg-gray-700 rounded-full text-gray-300"
           >
             <ArrowLeft size={24} />
@@ -225,7 +295,9 @@ export const DeliveryOrderDetails = () => {
                 showToast(`Order #${dispatchItem.orderId} accepted!`, 'success');
               } catch (err) {
                 const msg =
-                  err instanceof Error ? err.message : 'Unable to accept order';
+                  err instanceof Error && !err.message.trim().startsWith('{')
+                    ? err.message
+                    : 'Unable to accept order. It may have been claimed or cancelled.';
                 showToast(msg, 'error');
               } finally {
                 setBusy(false);
@@ -284,7 +356,8 @@ export const DeliveryOrderDetails = () => {
   };
 
   const handleProofFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+    const inputEl = e.currentTarget;
+    const file = inputEl.files?.[0];
     if (!file) return;
     setUploadingProof(true);
     try {
@@ -298,6 +371,7 @@ export const DeliveryOrderDetails = () => {
       showToast(msg, 'error');
     } finally {
       setUploadingProof(false);
+      inputEl.value = '';
     }
   };
 
@@ -383,7 +457,7 @@ export const DeliveryOrderDetails = () => {
       {/* Header */}
       <div className="bg-gray-800 p-4 shadow-sm flex items-center gap-4 sticky top-0 z-10 border-b border-gray-700 safe-top">
         <button
-          onClick={() => navigate(-1)}
+          onClick={handleGoBack}
           className="p-2 hover:bg-gray-700 rounded-full text-gray-300"
         >
           <ArrowLeft size={24} />
@@ -410,6 +484,13 @@ export const DeliveryOrderDetails = () => {
       </div>
 
       <div className="p-4 space-y-4">
+        {!isAssignedToMe && (
+          <div className="bg-amber-500/15 border border-amber-500/30 p-3.5 rounded-xl flex items-center gap-2.5 text-xs text-amber-300">
+            <AlertTriangle size={16} className="shrink-0" />
+            <span>This trip is currently assigned to another partner ({assignedOrder.assignedToName || 'Reassigned'}).</span>
+          </div>
+        )}
+
         {/* Live GPS Telemetry Bar (shown when active) */}
         {isAssignedToMe &&
           (assignedOrder.status === 'packed' ||
@@ -420,6 +501,8 @@ export const DeliveryOrderDetails = () => {
                   className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${
                     gpsStatus === 'streaming'
                       ? 'bg-blue-500/20 text-blue-400'
+                      : gpsStatus === 'denied' || gpsStatus === 'unsupported'
+                      ? 'bg-red-500/20 text-red-400'
                       : 'bg-gray-700 text-gray-400'
                   }`}
                 >
@@ -434,26 +517,43 @@ export const DeliveryOrderDetails = () => {
                       ? 'Live GPS Streaming (10s / 30m throttle)'
                       : gpsStatus === 'denied'
                       ? 'Location permission denied'
+                      : gpsStatus === 'unsupported'
+                      ? 'GPS unavailable on this device'
+                      : gpsStatus === 'error'
+                      ? 'GPS signal temporarily weak'
                       : 'GPS paused'}
                   </p>
                   <p className="text-[11px] text-gray-400 truncate">
-                    {lastPingCoords
+                    {gpsErrorMsg
+                      ? gpsErrorMsg
+                      : lastPingCoords
                       ? `Last ping ${lastPingCoords.time} (${lastPingCoords.lat.toFixed(4)}, ${lastPingCoords.lng.toFixed(4)})`
                       : 'Acquiring GPS coordinates...'}
                   </p>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => setGpsEnabled((prev) => !prev)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition shrink-0 ${
-                  gpsEnabled
-                    ? 'bg-blue-500/20 border-blue-500/40 text-blue-300'
-                    : 'bg-gray-700 border-gray-600 text-gray-300'
-                }`}
-              >
-                {gpsEnabled ? 'Pause GPS' : 'Resume GPS'}
-              </button>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {(gpsStatus === 'denied' || gpsStatus === 'error' || (gpsEnabled && !lastPingCoords)) && (
+                  <button
+                    type="button"
+                    onClick={handleManualGpsRefresh}
+                    className="px-2.5 py-1.5 rounded-lg text-xs font-bold border bg-gray-700 border-gray-600 text-gray-200 hover:bg-gray-600 transition"
+                  >
+                    Sync Now
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setGpsEnabled((prev) => !prev)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition ${
+                    gpsEnabled
+                      ? 'bg-blue-500/20 border-blue-500/40 text-blue-300'
+                      : 'bg-gray-700 border-gray-600 text-gray-300'
+                  }`}
+                >
+                  {gpsEnabled ? 'Pause GPS' : 'Resume GPS'}
+                </button>
+              </div>
             </div>
           )}
 
@@ -580,83 +680,97 @@ export const DeliveryOrderDetails = () => {
           <h2 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">
             Live Progress
           </h2>
-          <div className="space-y-5 relative pl-4 border-l-2 border-gray-700 ml-2">
-            <div className="relative">
-              <div className="absolute -left-[21px] top-0 w-4 h-4 rounded-full bg-green-500 border-2 border-gray-800 shadow-sm"></div>
-              <p className="font-bold text-sm text-white">Order Placed</p>
-              <p className="text-xs text-gray-400">
-                {assignedOrder.assignedToName
-                  ? `Assigned to ${assignedOrder.assignedToName}`
-                  : 'Awaiting driver acceptance'}
-              </p>
+          {assignedOrder.status === 'cancelled' ? (
+            <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-xl flex items-start gap-3">
+              <XCircle size={20} className="text-red-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-bold text-sm text-red-300">Trip Cancelled / Returned</p>
+                <p className="text-xs text-red-200/80 mt-0.5">
+                  {assignedOrder.failureReason
+                    ? `Reason: ${assignedOrder.failureReason}`
+                    : 'Order was cancelled before delivery completion.'}
+                </p>
+              </div>
             </div>
+          ) : (
+            <div className="space-y-5 relative pl-4 border-l-2 border-gray-700 ml-2">
+              <div className="relative">
+                <div className="absolute -left-[21px] top-0 w-4 h-4 rounded-full bg-green-500 border-2 border-gray-800 shadow-sm"></div>
+                <p className="font-bold text-sm text-white">Order Placed</p>
+                <p className="text-xs text-gray-400">
+                  {assignedOrder.assignedToName
+                    ? `Assigned to ${assignedOrder.assignedToName}`
+                    : 'Awaiting driver acceptance'}
+                </p>
+              </div>
 
-            <div
-              className={`relative ${
-                ['packed', 'out_for_delivery', 'delivered'].includes(
-                  assignedOrder.status
-                )
-                  ? 'opacity-100'
-                  : 'opacity-40'
-              }`}
-            >
               <div
-                className={`absolute -left-[21px] top-0 w-4 h-4 rounded-full border-2 border-gray-800 shadow-sm ${
+                className={`relative ${
                   ['packed', 'out_for_delivery', 'delivered'].includes(
                     assignedOrder.status
                   )
-                    ? 'bg-green-500'
-                    : 'bg-gray-600'
+                    ? 'opacity-100'
+                    : 'opacity-40'
                 }`}
-              ></div>
-              <p className="font-bold text-sm text-white">
-                Packed &amp; Picked Up at Hub
-              </p>
-              <p className="text-xs text-gray-400">Package verified by partner</p>
-            </div>
+              >
+                <div
+                  className={`absolute -left-[21px] top-0 w-4 h-4 rounded-full border-2 border-gray-800 shadow-sm ${
+                    ['packed', 'out_for_delivery', 'delivered'].includes(
+                      assignedOrder.status
+                    )
+                      ? 'bg-green-500'
+                      : 'bg-gray-600'
+                  }`}
+                ></div>
+                <p className="font-bold text-sm text-white">
+                  Packed &amp; Picked Up at Hub
+                </p>
+                <p className="text-xs text-gray-400">Package verified by partner</p>
+              </div>
 
-            <div
-              className={`relative ${
-                ['out_for_delivery', 'delivered'].includes(assignedOrder.status)
-                  ? 'opacity-100'
-                  : 'opacity-40'
-              }`}
-            >
               <div
-                className={`absolute -left-[21px] top-0 w-4 h-4 rounded-full border-2 border-gray-800 shadow-sm ${
-                  ['out_for_delivery', 'delivered'].includes(
-                    assignedOrder.status
-                  )
-                    ? 'bg-green-500'
-                    : 'bg-gray-600'
+                className={`relative ${
+                  ['out_for_delivery', 'delivered'].includes(assignedOrder.status)
+                    ? 'opacity-100'
+                    : 'opacity-40'
                 }`}
-              ></div>
-              <p className="font-bold text-sm text-white">Out for Delivery</p>
-              <p className="text-xs text-gray-400">
-                Driver en-route to customer address
-              </p>
-            </div>
+              >
+                <div
+                  className={`absolute -left-[21px] top-0 w-4 h-4 rounded-full border-2 border-gray-800 shadow-sm ${
+                    ['out_for_delivery', 'delivered'].includes(
+                      assignedOrder.status
+                    )
+                      ? 'bg-green-500'
+                      : 'bg-gray-600'
+                  }`}
+                ></div>
+                <p className="font-bold text-sm text-white">Out for Delivery</p>
+                <p className="text-xs text-gray-400">
+                  Driver en-route to customer address
+                </p>
+              </div>
 
-            <div
-              className={`relative ${
-                assignedOrder.status === 'delivered'
-                  ? 'opacity-100'
-                  : 'opacity-40'
-              }`}
-            >
               <div
-                className={`absolute -left-[21px] top-0 w-4 h-4 rounded-full border-2 border-gray-800 shadow-sm ${
+                className={`relative ${
                   assignedOrder.status === 'delivered'
-                    ? 'bg-green-500'
-                    : 'bg-gray-600'
+                    ? 'opacity-100'
+                    : 'opacity-40'
                 }`}
-              ></div>
-              <p className="font-bold text-sm text-white">Delivered</p>
-              <p className="text-xs text-gray-400">
-                Handed over to customer with 4-digit PIN verification
-              </p>
+              >
+                <div
+                  className={`absolute -left-[21px] top-0 w-4 h-4 rounded-full border-2 border-gray-800 shadow-sm ${
+                    assignedOrder.status === 'delivered'
+                      ? 'bg-green-500'
+                      : 'bg-gray-600'
+                  }`}
+                ></div>
+                <p className="font-bold text-sm text-white">Delivered</p>
+                <p className="text-xs text-gray-400">
+                  Handed over to customer with 4-digit PIN verification
+                </p>
+              </div>
             </div>
-          </div>
+          )}
         </div>
       </div>
 
@@ -690,8 +804,6 @@ export const DeliveryOrderDetails = () => {
                   onClick={() => {
                     setCustomerOtp('');
                     setPinError('');
-                    setProofUrl('');
-                    setProofInfo('');
                     setShowDeliveryModal(true);
                   }}
                   className="w-full bg-green-600 text-white py-3.5 rounded-xl font-bold text-base shadow-lg shadow-green-600/20 flex items-center justify-center gap-2 active:scale-[0.98] transition"
@@ -795,11 +907,23 @@ export const DeliveryOrderDetails = () => {
               </div>
 
               {proofUrl && (
-                <img
-                  src={proofUrl}
-                  alt="Compressed delivery proof"
-                  className="w-full h-32 object-cover rounded-lg border border-gray-700"
-                />
+                <div className="relative">
+                  <img
+                    src={proofUrl}
+                    alt="Compressed delivery proof"
+                    className="w-full h-32 object-cover rounded-lg border border-gray-700"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setProofUrl('');
+                      setProofInfo('');
+                    }}
+                    className="mt-2 text-[11px] font-bold text-red-400 hover:underline"
+                  >
+                    Remove Photo
+                  </button>
+                </div>
               )}
 
               <label className="w-full py-2.5 px-3 bg-gray-800 hover:bg-gray-700 border border-gray-600 rounded-lg text-xs font-bold text-gray-200 flex items-center justify-center gap-2 cursor-pointer transition">

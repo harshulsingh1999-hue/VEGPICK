@@ -68,6 +68,22 @@ export const DeliveryRegister = () => {
       showToast('Please enter your city / area and pincode.', 'error');
       return;
     }
+    if (step === 2 && formData.dlNumber.trim().length < 5) {
+      showToast('Please enter a valid Driving License number (min 5 characters).', 'error');
+      return;
+    }
+    if (step === 3) {
+      const cleanAcc = formData.bankAccount.replace(/\D/g, '');
+      const cleanIfsc = formData.ifsc.trim().toUpperCase();
+      if (cleanAcc.length < 6) {
+        showToast('Please enter a valid bank account number (at least 6 digits).', 'error');
+        return;
+      }
+      if (!/^[A-Z]{4}0[A-Z0-9]{6}$/.test(cleanIfsc)) {
+        showToast('Please enter a valid 11-character IFSC code (e.g. HDFC0001234).', 'error');
+        return;
+      }
+    }
     setStep((s) => s + 1);
   };
 

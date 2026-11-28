@@ -14,7 +14,7 @@ import {
   where,
   writeBatch
 } from 'firebase/firestore';
-import { db, handleFirestoreError, OperationType } from '../lib/firebase';
+import { auth, db, handleFirestoreError, OperationType } from '../lib/firebase';
 import { archiveLedgerAsync, archiveOrderAsync } from '../lib/apiClient';
 import {
   DispatchFeedItem,
@@ -105,11 +105,11 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   // 1. Subscribe to current authenticated user's deliveryPartner profile (if registered)
   useEffect(() => {
-    if (!authReady) return;
+    if (!authReady) return undefined;
     if (!firebaseUser) {
       setDeliveryUser(null);
       setPartnerLoading(false);
-      return;
+      return undefined;
     }
 
     setPartnerLoading(true);
@@ -126,6 +126,7 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       },
       (error) => {
         setPartnerLoading(false);
+        if (!auth.currentUser) return;
         handleFirestoreError(error, OperationType.GET, `deliveryPartners/${firebaseUser.uid}`);
       }
     );
@@ -138,13 +139,13 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (!authReady || !firebaseUser || !deliveryUser?.isApproved) {
       setAssignedOrders([]);
       setAvailableOrders([]);
-      return;
+      return undefined;
     }
 
     const assignedQ = query(
       collection(db, 'orders'),
       where('assignedToUid', '==', firebaseUser.uid),
-      limit(50)
+      limit(500)
     );
     const unsubAssigned = onSnapshot(
       assignedQ,
@@ -157,6 +158,7 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setAssignedOrders(list);
       },
       (error) => {
+        if (!auth.currentUser) return;
         handleFirestoreError(error, OperationType.LIST, 'orders');
       }
     );
@@ -164,7 +166,7 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const feedQ = query(
       collection(db, 'dispatchFeed'),
       where('assignedToUid', '==', ''),
-      limit(50)
+      limit(100)
     );
     const unsubFeed = onSnapshot(
       feedQ,
@@ -178,6 +180,7 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setAvailableOrders(list);
       },
       (error) => {
+        if (!auth.currentUser) return;
         handleFirestoreError(error, OperationType.LIST, 'dispatchFeed');
       }
     );
@@ -192,7 +195,7 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   useEffect(() => {
     if (!authReady || !firebaseUser || !isBootstrappedAdmin) {
       setDeliveryMen([]);
-      return;
+      return undefined;
     }
 
     const unsub = onSnapshot(
@@ -205,6 +208,7 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setDeliveryMen(list);
       },
       (error) => {
+        if (!auth.currentUser) return;
         handleFirestoreError(error, OperationType.LIST, 'deliveryPartners');
       }
     );
@@ -216,12 +220,12 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   useEffect(() => {
     if (!authReady || !firebaseUser || (!isBootstrappedAdmin && !deliveryUser?.isApproved)) {
       setWalletLedger([]);
-      return;
+      return undefined;
     }
 
     const ledgerQ = isBootstrappedAdmin
-      ? query(collection(db, 'walletLedger'), limit(100))
-      : query(collection(db, 'walletLedger'), where('partnerUid', '==', firebaseUser.uid), limit(50));
+      ? query(collection(db, 'walletLedger'), limit(250))
+      : query(collection(db, 'walletLedger'), where('partnerUid', '==', firebaseUser.uid), limit(500));
 
     const unsub = onSnapshot(
       ledgerQ,
@@ -242,6 +246,7 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setWalletLedger(entries);
       },
       (error) => {
+        if (!auth.currentUser) return;
         handleFirestoreError(error, OperationType.LIST, 'walletLedger');
       }
     );
@@ -368,6 +373,7 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const upsertActiveGpsLocation = useCallback(
     async (order: Order, coords: GpsCoordinateInput): Promise<void> => {
       if (!firebaseUser || !deliveryUser || !deliveryUser.isApproved) return;
+      if (order.assignedToUid !== firebaseUser.uid) return;
       if (order.status === 'delivered' || order.status === 'cancelled') return;
 
       const activeStatus =
@@ -401,6 +407,10 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             updatedAt: serverTimestamp()
           });
         } else {
+          const existingPartnerUid = (snap.data() as Partial<{ partnerUid: string }>)?.partnerUid;
+          if (existingPartnerUid && existingPartnerUid !== firebaseUser.uid) {
+            return;
+          }
           await updateDoc(activeRef, {
             status: activeStatus,
             lat,
@@ -412,6 +422,7 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           });
         }
       } catch (error) {
+        if (!auth.currentUser) return;
         handleFirestoreError(error, OperationType.WRITE, `active_deliveries/${order.id}`);
       }
     },
@@ -487,30 +498,41 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         });
       }
 
+      const deterministicLedgerId = `trip_${orderId}`;
+      const alreadyCredited = walletLedger.some(
+        (entry) => entry.id === deterministicLedgerId || (entry.orderId === orderId && entry.type === 'trip_credit')
+      );
+
       if (status === 'delivered') {
         batch.update(doc(db, 'deliveryPartners', firebaseUser.uid), {
           completedDeliveries: increment(1),
           updatedAt: serverTimestamp()
         });
-        const ledgerId = `trip_${orderId}_${Date.now()}`;
-        batch.set(doc(db, 'walletLedger', ledgerId), {
-          id: ledgerId,
-          partnerUid: firebaseUser.uid,
-          partnerName: safePartnerName,
-          orderId,
-          type: 'trip_credit',
-          amount: 45,
-          note: `Completed delivery payout for #${orderId}`,
-          createdAt: serverTimestamp()
-        });
+        if (!alreadyCredited) {
+          batch.set(doc(db, 'walletLedger', deterministicLedgerId), {
+            id: deterministicLedgerId,
+            partnerUid: firebaseUser.uid,
+            partnerName: safePartnerName,
+            orderId,
+            type: 'trip_credit',
+            amount: 45,
+            note: `Completed delivery payout for #${orderId}`,
+            createdAt: serverTimestamp()
+          });
+        }
       }
 
       // Cost-saving cleanup: remove ephemeral GPS tracking doc once terminal state reached
-      if ((status === 'delivered' || status === 'cancelled') && (activeSnap === null || activeSnap.exists())) {
+      if ((status === 'delivered' || status === 'cancelled') && activeSnap?.exists()) {
         batch.delete(doc(db, 'active_deliveries', orderId));
       }
 
       await batch.commit();
+
+      if ((status === 'delivered' || status === 'cancelled') && activeSnap === null) {
+        void deleteDoc(doc(db, 'active_deliveries', orderId)).catch(() => undefined);
+      }
+
       archiveOrderAsync({
         ...targetOrder,
         status,
@@ -518,7 +540,7 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       });
       if (status === 'delivered') {
         archiveLedgerAsync({
-          id: `trip_${orderId}`,
+          id: deterministicLedgerId,
           partnerUid: firebaseUser.uid,
           orderId,
           type: 'trip_credit',
@@ -588,6 +610,11 @@ export const DeliveryProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const cleanPhone = data.phone.replace(/\D/g, '').slice(0, 15);
     if (cleanPhone.length < 10) {
       throw new Error('Please enter a valid 10-digit mobile number.');
+    }
+
+    const existingSnap = await getDoc(doc(db, 'deliveryPartners', docId)).catch(() => null);
+    if (existingSnap?.exists()) {
+      throw new Error(`Delivery partner account with UID ${docId} already exists.`);
     }
 
     const newBoy: DeliveryPersonnel = {

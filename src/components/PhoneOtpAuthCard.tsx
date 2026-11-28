@@ -128,7 +128,7 @@ export const PhoneOtpAuthCard: React.FC<PhoneOtpAuthCardProps> = ({
   // When switched to interactive ('normal') mode on phone step, render the visible reCAPTCHA checkbox immediately
   useEffect(() => {
     if (step !== 'phone' || recaptchaMode !== 'normal') {
-      return;
+      return undefined;
     }
     let active = true;
     void mountRecaptchaVerifier('normal').catch((err) => {
@@ -149,7 +149,7 @@ export const PhoneOtpAuthCard: React.FC<PhoneOtpAuthCardProps> = ({
   }, [clearRecaptcha]);
 
   useEffect(() => {
-    if (resendSeconds <= 0) return;
+    if (resendSeconds <= 0) return undefined;
     const timer = window.setInterval(() => {
       setResendSeconds((prev) => (prev <= 1 ? 0 : prev - 1));
     }, 1000);

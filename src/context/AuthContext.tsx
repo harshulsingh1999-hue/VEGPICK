@@ -255,7 +255,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     if (!authReady || !firebaseUser) {
       setUser(null);
-      return;
+      return undefined;
     }
 
     const userDocRef = doc(db, 'users', firebaseUser.uid);
@@ -270,6 +270,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       },
       (error) => {
+        if (!auth.currentUser) return;
         handleFirestoreError(error, OperationType.GET, `users/${firebaseUser.uid}`);
       }
     );
@@ -281,13 +282,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     if (!authReady || !firebaseUser) {
       setOrders([]);
-      return;
+      return undefined;
     }
 
     const ordersQuery = query(
       collection(db, 'orders'),
       where('userId', '==', firebaseUser.uid),
-      limit(35)
+      limit(100)
     );
 
     const unsub = onSnapshot(
@@ -301,6 +302,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setOrders(list);
       },
       (error) => {
+        if (!auth.currentUser) return;
         handleFirestoreError(error, OperationType.LIST, 'orders');
       }
     );
@@ -320,7 +322,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUsersCursor(null);
       setHasMoreUsers(false);
       setAdminList([]);
-      return;
+      return undefined;
     }
 
     const unsubOrders = onSnapshot(
@@ -339,6 +341,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       },
       (error) => {
+        if (!auth.currentUser) return;
         handleFirestoreError(error, OperationType.LIST, 'orders');
       }
     );
@@ -359,6 +362,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       },
       (error) => {
+        if (!auth.currentUser) return;
         handleFirestoreError(error, OperationType.LIST, 'users');
       }
     );
@@ -377,6 +381,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setAdminList(list);
       },
       (error) => {
+        if (!auth.currentUser) return;
         handleFirestoreError(error, OperationType.LIST, 'admins');
       }
     );
@@ -1002,7 +1007,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const safePartnerName = (deliveryName.trim() || 'Delivery Partner').slice(0, 120);
       const safePartnerCode = (deliveryCode.trim() || 'DEL').slice(0, 32);
 
-      const feedSnap = await getDoc(doc(db, 'dispatchFeed', orderId)).catch(() => null);
+      const [feedSnap, activeSnap] = await Promise.all([
+        getDoc(doc(db, 'dispatchFeed', orderId)).catch(() => null),
+        getDoc(doc(db, 'active_deliveries', orderId)).catch(() => null)
+      ]);
 
       const batch = writeBatch(db);
       batch.update(doc(db, 'orders', orderId), {
@@ -1019,26 +1027,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           updatedAt: serverTimestamp()
         });
       }
-      if (currentOrder?.userId && nextStatus !== 'delivered' && nextStatus !== 'cancelled') {
-        const activeStatus =
-          nextStatus === 'out_for_delivery'
-            ? 'out_for_delivery'
-            : nextStatus === 'packed'
-            ? 'picked_up'
-            : 'assigned';
-        batch.set(doc(db, 'active_deliveries', orderId), {
-          orderId,
-          customerUid: currentOrder.userId,
-          partnerUid: deliveryUid,
-          partnerName: safePartnerName,
-          status: activeStatus,
-          lat: 28.6139,
-          lng: 77.2090,
-          accuracy: 50,
-          speed: 0,
-          heading: 0,
-          updatedAt: serverTimestamp()
-        });
+      if (activeSnap?.exists()) {
+        const activePartnerUid = (activeSnap.data() as Partial<{ partnerUid: string }>)?.partnerUid;
+        if (nextStatus === 'delivered' || nextStatus === 'cancelled' || activePartnerUid !== deliveryUid) {
+          batch.delete(doc(db, 'active_deliveries', orderId));
+        }
       }
       await batch.commit();
       if (currentOrder) {

@@ -11,8 +11,6 @@ export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
-export const FIREBASE_PROJECT_ID = firebaseConfig.projectId;
-export const FIRESTORE_DATABASE_ID = firebaseConfig.firestoreDatabaseId;
 export const BOOTSTRAPPED_ADMIN_EMAIL = 'harshulsingh1999@gmail.com';
 
 export enum OperationType {

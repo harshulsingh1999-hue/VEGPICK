@@ -253,11 +253,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   //    - Bootstrapped Admin receives live Firestore onSnapshot sync
   //    - 1M daily customers/guests hydrate from Edge-Cached /api/catalog/bootstrap + SWR (near-zero Firestore reads)
   useEffect(() => {
-    if (!authReady) return;
+    if (!authReady) return undefined;
 
     if (!isBootstrappedAdmin) {
       void fetchEdgeCatalogAndFallback();
-      return;
+      return undefined;
     }
 
     const q = query(collection(db, 'products'), where('pricePerKg', '>=', 0), limit(200));
@@ -335,7 +335,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   useEffect(() => {
     if (!authReady || !firebaseUser) {
       setComplaints([]);
-      return;
+      return undefined;
     }
 
     const complaintsQuery = isBootstrappedAdmin
@@ -361,11 +361,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   // 5. Cross-device persistent Cart (synced to carts/{uid} when logged in)
   useEffect(() => {
-    if (!authReady) return;
+    if (!authReady) return undefined;
 
     if (!firebaseUser) {
       localStorage.setItem(GUEST_CART_KEY, JSON.stringify(cart));
-      return;
+      return undefined;
     }
 
     const cartRef = doc(db, 'carts', firebaseUser.uid);

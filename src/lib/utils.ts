@@ -1,10 +1,4 @@
-import { type ClassValue, clsx } from "clsx";
-import { twMerge } from "tailwind-merge";
 import type { AppSettings, Order } from "./data";
-
-export function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
 
 export const formatCurrency = (amount: number) => {
   return new Intl.NumberFormat("en-IN", {

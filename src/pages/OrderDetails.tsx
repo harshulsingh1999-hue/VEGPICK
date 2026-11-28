@@ -55,7 +55,7 @@ export const OrderDetails = () => {
       order.status === 'cancelled'
     ) {
       setLiveTelemetry(null);
-      return;
+      return undefined;
     }
 
     const q = isAdmin
@@ -199,7 +199,7 @@ export const OrderDetails = () => {
       )}
 
       {/* Ephemeral Live Rider GPS Telemetry Card */}
-      {liveTelemetry && (
+      {liveTelemetry && (Math.abs(liveTelemetry.lat) > 0.0001 || Math.abs(liveTelemetry.lng) > 0.0001) ? (
         <div className="bg-blue-50 border border-blue-200 p-4 rounded-2xl mb-5 space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
@@ -244,6 +244,23 @@ export const OrderDetails = () => {
             <MapPin size={15} /> View Rider Pin in Google Maps
           </a>
         </div>
+      ) : (
+        order.assignedToName &&
+        (order.status === 'packed' || order.status === 'out_for_delivery') && (
+          <div className="bg-blue-50/70 border border-blue-200 p-3.5 rounded-2xl mb-5 flex items-center gap-3">
+            <div className="w-9 h-9 bg-blue-100 text-blue-700 rounded-full flex items-center justify-center shrink-0">
+              <Navigation size={16} />
+            </div>
+            <div>
+              <p className="text-xs font-bold text-blue-900">
+                {order.assignedToName} is assigned to your delivery
+              </p>
+              <p className="text-[11px] text-blue-700">
+                Live GPS pin will appear automatically once your partner starts route location sharing.
+              </p>
+            </div>
+          </div>
+        )
       )}
 
       {/* Tracking Timeline */}

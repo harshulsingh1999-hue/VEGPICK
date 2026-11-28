@@ -301,7 +301,16 @@ export function createCloudStack(rootDir: string, firebaseMeta: FirebaseAppletMe
       const integrity = db.pragma('integrity_check', { simple: true });
       healthy = integrity === 'ok';
       if (!healthy) {
-        sqliteRecoveredReason = `integrity_check returned ${String(integrity)}`;
+        try {
+          db.exec('REINDEX;');
+          const rechecked = db.pragma('integrity_check', { simple: true });
+          if (rechecked === 'ok') {
+            return db;
+          }
+          sqliteRecoveredReason = `integrity_check returned ${String(rechecked)}`;
+        } catch {
+          sqliteRecoveredReason = `integrity_check returned ${String(integrity)}`;
+        }
       }
     } catch (err) {
       sqliteRecoveredReason = err instanceof Error ? err.message : 'integrity_check failed';

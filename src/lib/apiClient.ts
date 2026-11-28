@@ -79,7 +79,6 @@ const loadRuntimeNodes = (): RuntimeServerNode[] => {
 let activeClusterNodes: RuntimeServerNode[] = loadRuntimeNodes();
 let autoFailoverEnabled = true;
 let primaryRoundRobinCursor = 0;
-let lastServedNodeId = 'primary-server-1';
 const circuitCooldownUntil = new Map<string, number>();
 
 export function syncRuntimeServerNodes(
@@ -141,18 +140,6 @@ export async function refreshRuntimeServerNodes(): Promise<void> {
       // try next server origin
     }
   }
-}
-
-export function getClusterRuntimeStatus(): {
-  lastServedNodeId: string;
-  nodeCount: number;
-  autoFailoverEnabled: boolean;
-} {
-  return {
-    lastServedNodeId,
-    nodeCount: activeClusterNodes.length,
-    autoFailoverEnabled
-  };
 }
 
 function buildOrderedCandidateTargets(): Array<{ id: string; url: string }> {
@@ -247,7 +234,6 @@ export async function apiFetch(
       }
 
       circuitCooldownUntil.delete(target.id);
-      lastServedNodeId = target.id;
       return response;
     } catch (err) {
       circuitCooldownUntil.set(target.id, Date.now() + CIRCUIT_BREAKER_COOLDOWN_MS);

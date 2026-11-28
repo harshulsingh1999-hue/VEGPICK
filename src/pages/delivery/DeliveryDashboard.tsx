@@ -56,9 +56,9 @@ export const DeliveryDashboard = () => {
         setShowNewOrder(true);
       }, 1500);
       return () => clearTimeout(timer);
-    } else {
-      setShowNewOrder(false);
     }
+    setShowNewOrder(false);
+    return undefined;
   }, [deliveryUser?.isApproved, deliveryUser?.isOnline, nextAvailableOrder?.orderId]);
 
   const handleLogout = async () => {
@@ -84,9 +84,17 @@ export const DeliveryDashboard = () => {
       await acceptOrder(orderId);
       setShowNewOrder(false);
       setActiveTab('pending');
-      showToast(`Order #${orderId} accepted!`, 'success');
+      showToast(
+        deliveryUser?.isOnline
+          ? `Order #${orderId} accepted!`
+          : `Order #${orderId} accepted! Remember to toggle On Duty to share live dispatch updates.`,
+        'success'
+      );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Unable to accept order';
+      const msg =
+        err instanceof Error && !err.message.trim().startsWith('{')
+          ? err.message
+          : 'Unable to accept order. It may have been claimed or cancelled.';
       showToast(msg, 'error');
     } finally {
       setBusyOrderId(null);
@@ -105,10 +113,28 @@ export const DeliveryDashboard = () => {
     return null;
   }
 
+  const isZoneMatch = (city?: string, zip?: string) => {
+    const areaTokens = (deliveryUser.area || '')
+      .toLowerCase()
+      .split(/[\s,()\-]+/)
+      .filter((t) => t.length >= 3);
+    if (areaTokens.length === 0) return false;
+    const target = `${city || ''} ${zip || ''}`.toLowerCase();
+    return areaTokens.some((tok) => target.includes(tok));
+  };
+
+  const sortedAvailableOrders = [...availableOrders].sort((a, b) => {
+    const aMatch = isZoneMatch(a.city, a.zip) ? 1 : 0;
+    const bMatch = isZoneMatch(b.city, b.zip) ? 1 : 0;
+    return bMatch - aMatch;
+  });
+
   const pendingOrders = assignedOrders.filter(
     (o) => o.status !== 'delivered' && o.status !== 'cancelled'
   );
-  const completedOrders = assignedOrders.filter((o) => o.status === 'delivered');
+  const completedOrders = assignedOrders.filter(
+    (o) => o.status === 'delivered' || o.status === 'cancelled'
+  );
 
   return (
     <div className="min-h-screen bg-gray-900 text-white pb-28">
@@ -312,23 +338,34 @@ export const DeliveryDashboard = () => {
               : 'bg-gray-800 text-gray-400 border border-gray-700'
           }`}
         >
-          History ({stats.completed})
+          History ({completedOrders.length})
         </button>
       </div>
 
       {/* Orders List */}
       <div className="px-4 space-y-3">
         {activeTab === 'available'
-          ? availableOrders.map((item) => (
+          ? sortedAvailableOrders.map((item) => {
+              const matchedZone = isZoneMatch(item.city, item.zip);
+              return (
               <div
                 key={item.orderId}
-                className="block bg-gray-800 p-4 rounded-xl shadow-sm border border-gray-700 transition"
+                className={`block bg-gray-800 p-4 rounded-xl shadow-sm border transition ${
+                  matchedZone ? 'border-green-500/40' : 'border-gray-700'
+                }`}
               >
                 <div className="flex justify-between items-start mb-2">
                   <div>
-                    <span className="bg-blue-500/20 text-blue-300 text-[10px] font-bold px-2 py-0.5 rounded">
-                      #{item.orderId}
-                    </span>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="bg-blue-500/20 text-blue-300 text-[10px] font-bold px-2 py-0.5 rounded">
+                        #{item.orderId}
+                      </span>
+                      {matchedZone && (
+                        <span className="bg-green-500/20 text-green-300 text-[10px] font-bold px-2 py-0.5 rounded">
+                          ★ Your Zone
+                        </span>
+                      )}
+                    </div>
                     <h3 className="font-bold text-white mt-1.5 text-base">
                       {item.city} — {item.zip}
                     </h3>
@@ -372,7 +409,8 @@ export const DeliveryDashboard = () => {
                   </div>
                 </div>
               </div>
-            ))
+              );
+            })
           : (activeTab === 'pending' ? pendingOrders : completedOrders).map(
               (order) => (
                 <div
@@ -396,6 +434,8 @@ export const DeliveryDashboard = () => {
                         className={`text-[11px] font-bold px-2 py-0.5 rounded ${
                           order.status === 'delivered'
                             ? 'bg-green-500/20 text-green-400'
+                            : order.status === 'cancelled'
+                            ? 'bg-red-500/20 text-red-400'
                             : order.status === 'out_for_delivery'
                             ? 'bg-blue-500/20 text-blue-400'
                             : order.status === 'packed'
